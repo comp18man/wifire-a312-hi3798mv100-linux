@@ -15,8 +15,10 @@ select:
     compatible:
       contains:
         enum:
+          - google,gs101-pmu
           - samsung,exynos3250-pmu
           - samsung,exynos4210-pmu
+          - samsung,exynos4212-pmu
           - samsung,exynos4412-pmu
           - samsung,exynos5250-pmu
           - samsung,exynos5260-pmu
@@ -34,8 +36,10 @@ properties:
     oneOf:
       - items:
           - enum:
+              - google,gs101-pmu
               - samsung,exynos3250-pmu
               - samsung,exynos4210-pmu
+              - samsung,exynos4212-pmu
               - samsung,exynos4412-pmu
               - samsung,exynos5250-pmu
               - samsung,exynos5260-pmu
@@ -48,6 +52,23 @@ properties:
           - const: syscon
       - items:
           - enum:
+              - samsung,exynos2200-pmu
+              - samsung,exynos7870-pmu
+              - samsung,exynos7885-pmu
+              - samsung,exynos8895-pmu
+              - samsung,exynos9810-pmu
+              - samsung,exynos990-pmu
+              - samsung,exynosautov9-pmu
+              - samsung,exynosautov920-pmu
+              - tesla,fsd-pmu
+          - const: samsung,exynos7-pmu
+          - const: syscon
+      - items:
+          - enum:
+              - samsung,exynos3250-pmu
+              - samsung,exynos4210-pmu
+              - samsung,exynos4212-pmu
+              - samsung,exynos4412-pmu
               - samsung,exynos5250-pmu
               - samsung,exynos5420-pmu
               - samsung,exynos5433-pmu
@@ -108,6 +129,11 @@ properties:
     description:
       Node for reboot method
 
+  google,pmu-intr-gen-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to PMU interrupt generation interface.
+
 required:
   - compatible
   - reg
@@ -122,6 +148,7 @@ allOf:
             enum:
               - samsung,exynos3250-pmu
               - samsung,exynos4210-pmu
+              - samsung,exynos4212-pmu
               - samsung,exynos4412-pmu
               - samsung,exynos5250-pmu
               - samsung,exynos5410-pmu
@@ -138,17 +165,47 @@ allOf:
         compatible:
           contains:
             enum:
+              - samsung,exynos3250-pmu
+              - samsung,exynos4210-pmu
+              - samsung,exynos4212-pmu
+              - samsung,exynos4412-pmu
+              - samsung,exynos5250-pmu
+              - samsung,exynos5420-pmu
+              - samsung,exynos5433-pmu
+    then:
+      properties:
+        mipi-phy: true
+    else:
+      properties:
+        mipi-phy: false
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
               - samsung,exynos5250-pmu
               - samsung,exynos5420-pmu
               - samsung,exynos5433-pmu
     then:
       properties:
         dp-phy: true
-        mipi-phy: true
     else:
       properties:
         dp-phy: false
-        mipi-phy: false
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - google,gs101-pmu
+    then:
+      required:
+        - google,pmu-intr-gen-syscon
+    else:
+      properties:
+        google,pmu-intr-gen-syscon: false
 
 examples:
   - |

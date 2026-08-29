@@ -8,10 +8,12 @@
 
 #include <linux/byteorder/generic.h>
 #include <linux/container_of.h>
+#include <linux/errno.h>
 #include <linux/etherdevice.h>
 #include <linux/gfp.h>
 #include <linux/if_ether.h>
 #include <linux/kref.h>
+#include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/netdevice.h>
@@ -59,7 +61,7 @@ static void batadv_tvlv_handler_put(struct batadv_tvlv_handler *tvlv_handler)
 /**
  * batadv_tvlv_handler_get() - retrieve tvlv handler from the tvlv handler list
  *  based on the provided type and version (both need to match)
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @type: tvlv handler type to look for
  * @version: tvlv handler version to look for
  *
@@ -118,7 +120,7 @@ static void batadv_tvlv_container_put(struct batadv_tvlv_container *tvlv)
 /**
  * batadv_tvlv_container_get() - retrieve tvlv container from the tvlv container
  *  list based on the provided type and version (both need to match)
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @type: tvlv container type to look for
  * @version: tvlv container version to look for
  *
@@ -152,17 +154,17 @@ batadv_tvlv_container_get(struct batadv_priv *bat_priv, u8 type, u8 version)
 /**
  * batadv_tvlv_container_list_size() - calculate the size of the tvlv container
  *  list entries
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  *
  * Has to be called with the appropriate locks being acquired
  * (tvlv.container_list_lock).
  *
  * Return: size of all currently registered tvlv containers in bytes.
  */
-static u16 batadv_tvlv_container_list_size(struct batadv_priv *bat_priv)
+static size_t batadv_tvlv_container_list_size(struct batadv_priv *bat_priv)
 {
 	struct batadv_tvlv_container *tvlv;
-	u16 tvlv_len = 0;
+	size_t tvlv_len = 0;
 
 	lockdep_assert_held(&bat_priv->tvlv.container_list_lock);
 
@@ -177,7 +179,7 @@ static u16 batadv_tvlv_container_list_size(struct batadv_priv *bat_priv)
 /**
  * batadv_tvlv_container_remove() - remove tvlv container from the tvlv
  *  container list
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @tvlv: the to be removed tvlv container
  *
  * Has to be called with the appropriate locks being acquired
@@ -201,7 +203,7 @@ static void batadv_tvlv_container_remove(struct batadv_priv *bat_priv,
 /**
  * batadv_tvlv_container_unregister() - unregister tvlv container based on the
  *  provided type and version (both need to match)
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @type: tvlv container type to unregister
  * @version: tvlv container type to unregister
  */
@@ -219,7 +221,7 @@ void batadv_tvlv_container_unregister(struct batadv_priv *bat_priv,
 /**
  * batadv_tvlv_container_register() - register tvlv type, version and content
  *  to be propagated with each (primary interface) OGM
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @type: tvlv container type
  * @version: tvlv container version
  * @tvlv_value: tvlv container content
@@ -297,7 +299,7 @@ static bool batadv_tvlv_realloc_packet_buff(unsigned char **packet_buff,
 /**
  * batadv_tvlv_container_ogm_append() - append tvlv container content to given
  *  OGM packet buffer
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @packet_buff: ogm packet buffer
  * @packet_buff_len: ogm packet buffer size including ogm header and tvlv
  *  content
@@ -306,26 +308,35 @@ static bool batadv_tvlv_realloc_packet_buff(unsigned char **packet_buff,
  * The ogm packet might be enlarged or shrunk depending on the current size
  * and the size of the to-be-appended tvlv containers.
  *
- * Return: size of all appended tvlv containers in bytes.
+ * Return: size of all appended tvlv containers in bytes (max U16_MAX), negative
+ *  if operation failed
  */
-u16 batadv_tvlv_container_ogm_append(struct batadv_priv *bat_priv,
+int batadv_tvlv_container_ogm_append(struct batadv_priv *bat_priv,
 				     unsigned char **packet_buff,
 				     int *packet_buff_len, int packet_min_len)
 {
 	struct batadv_tvlv_container *tvlv;
 	struct batadv_tvlv_hdr *tvlv_hdr;
-	u16 tvlv_value_len;
+	size_t tvlv_value_len;
 	void *tvlv_value;
+	int tvlv_len_ret;
 	bool ret;
 
 	spin_lock_bh(&bat_priv->tvlv.container_list_lock);
 	tvlv_value_len = batadv_tvlv_container_list_size(bat_priv);
+	if (tvlv_value_len > U16_MAX) {
+		tvlv_len_ret = -E2BIG;
+		goto end;
+	}
 
 	ret = batadv_tvlv_realloc_packet_buff(packet_buff, packet_buff_len,
 					      packet_min_len, tvlv_value_len);
-
-	if (!ret)
+	if (!ret) {
+		tvlv_len_ret = -ENOMEM;
 		goto end;
+	}
+
+	tvlv_len_ret = tvlv_value_len;
 
 	if (!tvlv_value_len)
 		goto end;
@@ -344,13 +355,14 @@ u16 batadv_tvlv_container_ogm_append(struct batadv_priv *bat_priv,
 
 end:
 	spin_unlock_bh(&bat_priv->tvlv.container_list_lock);
-	return tvlv_value_len;
+
+	return tvlv_len_ret;
 }
 
 /**
  * batadv_tvlv_call_handler() - parse the given tvlv buffer to call the
  *  appropriate handlers
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @tvlv_handler: tvlv callback function handling the tvlv content
  * @packet_type: indicates for which packet type the TVLV handler is called
  * @orig_node: orig node emitting the ogm packet
@@ -386,7 +398,6 @@ static int batadv_tvlv_call_handler(struct batadv_priv *bat_priv,
 		tvlv_handler->ogm_handler(bat_priv, orig_node,
 					  BATADV_NO_FLAGS,
 					  tvlv_value, tvlv_value_len);
-		tvlv_handler->flags |= BATADV_TVLV_HANDLER_OGM_CALLED;
 		break;
 	case BATADV_UNICAST_TVLV:
 		if (!skb)
@@ -419,9 +430,51 @@ static int batadv_tvlv_call_handler(struct batadv_priv *bat_priv,
 }
 
 /**
+ * batadv_tvlv_containers_contain() - check if a tvlv buffer holds a container
+ * @tvlv_value: tvlv content
+ * @tvlv_value_len: tvlv content length
+ * @type: tvlv container type to look for
+ * @version: tvlv container version to look for
+ *
+ * Return: true if a container of the given type and version is present in the
+ * tvlv buffer, false otherwise.
+ */
+static bool batadv_tvlv_containers_contain(void *tvlv_value,
+					   u16 tvlv_value_len, u8 type,
+					   u8 version)
+{
+	struct batadv_tvlv_hdr *tvlv_hdr;
+	u16 tvlv_value_cont_len;
+
+	while (tvlv_value_len >= sizeof(*tvlv_hdr)) {
+		tvlv_hdr = tvlv_value;
+		tvlv_value_cont_len = ntohs(tvlv_hdr->len);
+		tvlv_value = tvlv_hdr + 1;
+		tvlv_value_len -= sizeof(*tvlv_hdr);
+
+		if (tvlv_value_cont_len > tvlv_value_len)
+			break;
+
+		/* the next tvlv header is accessed assuming (at least) 2-byte
+		 * alignment, so it must start at an even offset.
+		 */
+		if (tvlv_value_cont_len & 1)
+			break;
+
+		if (tvlv_hdr->type == type && tvlv_hdr->version == version)
+			return true;
+
+		tvlv_value = (u8 *)tvlv_value + tvlv_value_cont_len;
+		tvlv_value_len -= tvlv_value_cont_len;
+	}
+
+	return false;
+}
+
+/**
  * batadv_tvlv_containers_process() - parse the given tvlv buffer to call the
  *  appropriate handlers
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @packet_type: indicates for which packet type the TVLV handler is called
  * @orig_node: orig node emitting the ogm packet
  * @skb: the skb the TVLV handler is called for
@@ -437,7 +490,9 @@ int batadv_tvlv_containers_process(struct batadv_priv *bat_priv,
 				   struct sk_buff *skb, void *tvlv_value,
 				   u16 tvlv_value_len)
 {
+	u16 tvlv_value_start_len = tvlv_value_len;
 	struct batadv_tvlv_handler *tvlv_handler;
+	void *tvlv_value_start = tvlv_value;
 	struct batadv_tvlv_hdr *tvlv_hdr;
 	u16 tvlv_value_cont_len;
 	u8 cifnotfound = BATADV_TVLV_HANDLER_OGM_CIFNOTFND;
@@ -450,6 +505,12 @@ int batadv_tvlv_containers_process(struct batadv_priv *bat_priv,
 		tvlv_value_len -= sizeof(*tvlv_hdr);
 
 		if (tvlv_value_cont_len > tvlv_value_len)
+			break;
+
+		/* the next tvlv header is accessed assuming (at least) 2-byte
+		 * alignment, so it must start at an even offset.
+		 */
+		if (tvlv_value_cont_len & 1)
 			break;
 
 		tvlv_handler = batadv_tvlv_handler_get(bat_priv,
@@ -475,12 +536,20 @@ int batadv_tvlv_containers_process(struct batadv_priv *bat_priv,
 		if (!tvlv_handler->ogm_handler)
 			continue;
 
-		if ((tvlv_handler->flags & BATADV_TVLV_HANDLER_OGM_CIFNOTFND) &&
-		    !(tvlv_handler->flags & BATADV_TVLV_HANDLER_OGM_CALLED))
-			tvlv_handler->ogm_handler(bat_priv, orig_node,
-						  cifnotfound, NULL, 0);
+		if (!(tvlv_handler->flags & BATADV_TVLV_HANDLER_OGM_CIFNOTFND))
+			continue;
 
-		tvlv_handler->flags &= ~BATADV_TVLV_HANDLER_OGM_CALLED;
+		/* if the corresponding container was present then the handler
+		 * was already called from the loop above
+		 */
+		if (batadv_tvlv_containers_contain(tvlv_value_start,
+						   tvlv_value_start_len,
+						   tvlv_handler->type,
+						   tvlv_handler->version))
+			continue;
+
+		tvlv_handler->ogm_handler(bat_priv, orig_node,
+					  cifnotfound, NULL, 0);
 	}
 	rcu_read_unlock();
 
@@ -490,7 +559,7 @@ int batadv_tvlv_containers_process(struct batadv_priv *bat_priv,
 /**
  * batadv_tvlv_ogm_receive() - process an incoming ogm and call the appropriate
  *  handlers
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @batadv_ogm_packet: ogm packet containing the tvlv containers
  * @orig_node: orig node emitting the ogm packet
  */
@@ -518,7 +587,7 @@ void batadv_tvlv_ogm_receive(struct batadv_priv *bat_priv,
  * batadv_tvlv_handler_register() - register tvlv handler based on the provided
  *  type and version (both need to match) for ogm tvlv payload and/or unicast
  *  payload
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @optr: ogm tvlv handler callback function. This function receives the orig
  *  node, flags and the tvlv content as argument to process.
  * @uptr: unicast tvlv handler callback function. This function receives the
@@ -583,7 +652,7 @@ void batadv_tvlv_handler_register(struct batadv_priv *bat_priv,
 /**
  * batadv_tvlv_handler_unregister() - unregister tvlv handler based on the
  *  provided type and version (both need to match)
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @type: tvlv handler type to be unregistered
  * @version: tvlv handler version to be unregistered
  */
@@ -606,7 +675,7 @@ void batadv_tvlv_handler_unregister(struct batadv_priv *bat_priv,
 /**
  * batadv_tvlv_unicast_send() - send a unicast packet with tvlv payload to the
  *  specified host
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @src: source mac address of the unicast packet
  * @dst: destination mac address of the unicast packet
  * @type: tvlv type

@@ -34,7 +34,7 @@ EXPORT_SYMBOL_GPL(ulpi_write);
 
 /* -------------------------------------------------------------------------- */
 
-static int ulpi_match(struct device *dev, struct device_driver *driver)
+static int ulpi_match(struct device *dev, const struct device_driver *driver)
 {
 	struct ulpi_driver *drv = to_ulpi_driver(driver);
 	struct ulpi *ulpi = to_ulpi_dev(dev);
@@ -90,7 +90,7 @@ static void ulpi_remove(struct device *dev)
 		drv->remove(to_ulpi_dev(dev));
 }
 
-static struct bus_type ulpi_bus = {
+static const struct bus_type ulpi_bus = {
 	.name = "ulpi",
 	.match = ulpi_match,
 	.uevent = ulpi_uevent,
@@ -229,7 +229,7 @@ static int ulpi_read_id(struct ulpi *ulpi)
 	request_module("ulpi:v%04xp%04x", ulpi->id.vendor, ulpi->id.product);
 	return 0;
 err:
-	of_device_request_module(&ulpi->dev);
+	of_request_module(ulpi->dev.of_node);
 	return 0;
 }
 
@@ -281,6 +281,9 @@ static int ulpi_register(struct device *dev, struct ulpi *ulpi)
 	ulpi->dev.parent = dev; /* needed early for ops */
 	ulpi->dev.bus = &ulpi_bus;
 	ulpi->dev.type = &ulpi_dev_type;
+
+	device_initialize(&ulpi->dev);
+
 	dev_set_name(&ulpi->dev, "%s.ulpi", dev_name(dev));
 
 	ACPI_COMPANION_SET(&ulpi->dev, ACPI_COMPANION(dev));
@@ -290,18 +293,14 @@ static int ulpi_register(struct device *dev, struct ulpi *ulpi)
 		return ret;
 
 	ret = ulpi_read_id(ulpi);
-	if (ret) {
-		of_node_put(ulpi->dev.of_node);
+	if (ret)
 		return ret;
-	}
 
-	ret = device_register(&ulpi->dev);
-	if (ret) {
-		put_device(&ulpi->dev);
+	ret = device_add(&ulpi->dev);
+	if (ret)
 		return ret;
-	}
 
-	root = debugfs_create_dir(dev_name(dev), ulpi_root);
+	root = debugfs_create_dir(dev_name(&ulpi->dev), ulpi_root);
 	debugfs_create_file("regs", 0444, root, ulpi, &ulpi_regs_fops);
 
 	dev_dbg(&ulpi->dev, "registered ULPI PHY: vendor %04x, product %04x\n",
@@ -332,7 +331,7 @@ struct ulpi *ulpi_register_interface(struct device *dev,
 
 	ret = ulpi_register(dev, ulpi);
 	if (ret) {
-		kfree(ulpi);
+		put_device(&ulpi->dev);
 		return ERR_PTR(ret);
 	}
 

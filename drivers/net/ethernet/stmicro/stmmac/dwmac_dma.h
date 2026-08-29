@@ -22,6 +22,31 @@
 #define DMA_INTR_ENA		0x0000101c	/* Interrupt Enable */
 #define DMA_MISSED_FRAME_CTR	0x00001020	/* Missed Frame Counter */
 
+/* Following DMA defines are channels oriented */
+#define DMA_CHAN_BASE_OFFSET			0x100
+
+static inline u32 dma_chan_base_addr(u32 base, u32 chan)
+{
+	return base + chan * DMA_CHAN_BASE_OFFSET;
+}
+
+#define DMA_CHAN_BUS_MODE(chan)	dma_chan_base_addr(DMA_BUS_MODE, chan)
+#define DMA_CHAN_XMT_POLL_DEMAND(chan)	\
+				dma_chan_base_addr(DMA_XMT_POLL_DEMAND, chan)
+#define DMA_CHAN_RCV_POLL_DEMAND(chan)	\
+				dma_chan_base_addr(DMA_RCV_POLL_DEMAND, chan)
+#define DMA_CHAN_RCV_BASE_ADDR(chan)	\
+				dma_chan_base_addr(DMA_RCV_BASE_ADDR, chan)
+#define DMA_CHAN_TX_BASE_ADDR(chan)	\
+				dma_chan_base_addr(DMA_TX_BASE_ADDR, chan)
+#define DMA_CHAN_STATUS(chan)	dma_chan_base_addr(DMA_STATUS, chan)
+#define DMA_CHAN_CONTROL(chan)	dma_chan_base_addr(DMA_CONTROL, chan)
+#define DMA_CHAN_INTR_ENA(chan)	dma_chan_base_addr(DMA_INTR_ENA, chan)
+#define DMA_CHAN_MISSED_FRAME_CTR(chan)	\
+				dma_chan_base_addr(DMA_MISSED_FRAME_CTR, chan)
+#define DMA_CHAN_RX_WATCHDOG(chan)	\
+				dma_chan_base_addr(DMA_RX_WATCHDOG, chan)
+
 /* SW Reset */
 #define DMA_BUS_MODE_SFT_RESET	0x00000001	/* Software Reset */
 
@@ -34,11 +59,7 @@
 #define DMA_AXI_EN_LPI		BIT(31)
 #define DMA_AXI_LPI_XIT_FRM	BIT(30)
 #define DMA_AXI_WR_OSR_LMT	GENMASK(23, 20)
-#define DMA_AXI_WR_OSR_LMT_SHIFT	20
-#define DMA_AXI_WR_OSR_LMT_MASK	0xf
 #define DMA_AXI_RD_OSR_LMT	GENMASK(19, 16)
-#define DMA_AXI_RD_OSR_LMT_SHIFT	16
-#define DMA_AXI_RD_OSR_LMT_MASK	0xf
 
 #define DMA_AXI_OSR_MAX		0xf
 #define DMA_AXI_MAX_OSR_LIMIT ((DMA_AXI_OSR_MAX << DMA_AXI_WR_OSR_LMT_SHIFT) | \
@@ -107,10 +128,8 @@
 #define DMA_STATUS_EB_MASK	0x00380000	/* Error Bits Mask */
 #define DMA_STATUS_EB_TX_ABORT	0x00080000	/* Error Bits - TX Abort */
 #define DMA_STATUS_EB_RX_ABORT	0x00100000	/* Error Bits - RX Abort */
-#define DMA_STATUS_TS_MASK	0x00700000	/* Transmit Process State */
-#define DMA_STATUS_TS_SHIFT	20
-#define DMA_STATUS_RS_MASK	0x000e0000	/* Receive Process State */
-#define DMA_STATUS_RS_SHIFT	17
+#define DMA_STATUS_TS_MASK	GENMASK(22, 20)	/* Transmit Process State */
+#define DMA_STATUS_RS_MASK	GENMASK(19, 17)	/* Receive Process State */
 #define DMA_STATUS_NIS	0x00010000	/* Normal Interrupt Summary */
 #define DMA_STATUS_AIS	0x00008000	/* Abnormal Interrupt Summary */
 #define DMA_STATUS_ERI	0x00004000	/* Early Receive Interrupt */
@@ -152,15 +171,21 @@
 #define NUM_DWMAC1000_DMA_REGS	23
 #define NUM_DWMAC4_DMA_REGS	27
 
-void dwmac_enable_dma_transmission(void __iomem *ioaddr);
-void dwmac_enable_dma_irq(void __iomem *ioaddr, u32 chan, bool rx, bool tx);
-void dwmac_disable_dma_irq(void __iomem *ioaddr, u32 chan, bool rx, bool tx);
-void dwmac_dma_start_tx(void __iomem *ioaddr, u32 chan);
-void dwmac_dma_stop_tx(void __iomem *ioaddr, u32 chan);
-void dwmac_dma_start_rx(void __iomem *ioaddr, u32 chan);
-void dwmac_dma_stop_rx(void __iomem *ioaddr, u32 chan);
-int dwmac_dma_interrupt(void __iomem *ioaddr, struct stmmac_extra_stats *x,
-			u32 chan, u32 dir);
+void dwmac_enable_dma_transmission(void __iomem *ioaddr, u32 chan);
+void dwmac_enable_dma_irq(struct stmmac_priv *priv, void __iomem *ioaddr,
+			  u32 chan, bool rx, bool tx);
+void dwmac_disable_dma_irq(struct stmmac_priv *priv, void __iomem *ioaddr,
+			   u32 chan, bool rx, bool tx);
+void dwmac_dma_start_tx(struct stmmac_priv *priv, void __iomem *ioaddr,
+			u32 chan);
+void dwmac_dma_stop_tx(struct stmmac_priv *priv, void __iomem *ioaddr,
+		       u32 chan);
+void dwmac_dma_start_rx(struct stmmac_priv *priv, void __iomem *ioaddr,
+			u32 chan);
+void dwmac_dma_stop_rx(struct stmmac_priv *priv, void __iomem *ioaddr,
+		       u32 chan);
+int dwmac_dma_interrupt(struct stmmac_priv *priv, void __iomem *ioaddr,
+			struct stmmac_extra_stats *x, u32 chan, u32 dir);
 int dwmac_dma_reset(void __iomem *ioaddr);
 
 #endif /* __DWMAC_DMA_H__ */

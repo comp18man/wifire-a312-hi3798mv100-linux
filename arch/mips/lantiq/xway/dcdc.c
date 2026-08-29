@@ -6,7 +6,8 @@
  */
 
 #include <linux/ioport.h>
-#include <linux/of_platform.h>
+#include <linux/mod_devicetable.h>
+#include <linux/platform_device.h>
 
 #include <lantiq_soc.h>
 
@@ -45,7 +46,7 @@ static struct platform_driver dcdc_driver = {
 	},
 };
 
-int __init dcdc_init(void)
+static int __init dcdc_init(void)
 {
 	int ret = platform_driver_register(&dcdc_driver);
 

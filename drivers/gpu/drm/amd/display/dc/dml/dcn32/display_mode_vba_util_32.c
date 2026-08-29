@@ -1401,13 +1401,13 @@ void dml32_CalculateOutputLink(
 			if (Output == dm_dp2p0) {
 				*OutBpp = 0;
 				if ((OutputLinkDPRate == dm_dp_rate_na || OutputLinkDPRate == dm_dp_rate_uhbr10) &&
-						PHYCLKD32PerState >= 10000 / 32) {
+						PHYCLKD32PerState >= 10000.0 / 32) {
 					*OutBpp = dml32_TruncToValidBPP((1 - Downspreading / 100) * 10000,
 							OutputLinkDPLanes, HTotal, HActive, PixelClockBackEnd,
 							ForcedOutputLinkBPP, LinkDSCEnable, Output, OutputFormat,
 							DSCInputBitPerComponent, NumberOfDSCSlices, AudioSampleRate,
 							AudioSampleLayout, ODMModeNoDSC, ODMModeDSC, RequiredSlots);
-					if (*OutBpp == 0 && PHYCLKD32PerState < 13500 / 32 && DSCEnable == true &&
+					if (*OutBpp == 0 && PHYCLKD32PerState < 13500.0 / 32 && DSCEnable == true &&
 							ForcedOutputLinkBPP == 0) {
 						*RequiresDSC = true;
 						LinkDSCEnable = true;
@@ -1423,7 +1423,7 @@ void dml32_CalculateOutputLink(
 					*OutputRate = dm_output_rate_dp_rate_uhbr10;
 				}
 				if ((OutputLinkDPRate == dm_dp_rate_na || OutputLinkDPRate == dm_dp_rate_uhbr13p5) &&
-						*OutBpp == 0 && PHYCLKD32PerState >= 13500 / 32) {
+						*OutBpp == 0 && PHYCLKD32PerState >= 13500.0 / 32) {
 					*OutBpp = dml32_TruncToValidBPP((1 - Downspreading / 100) * 13500,
 							OutputLinkDPLanes, HTotal, HActive, PixelClockBackEnd,
 							ForcedOutputLinkBPP, LinkDSCEnable, Output, OutputFormat,
@@ -1595,19 +1595,19 @@ double dml32_TruncToValidBPP(
 	unsigned int   NonDSCBPP0;
 	unsigned int   NonDSCBPP1;
 	unsigned int   NonDSCBPP2;
-	unsigned int   NonDSCBPP3;
+	unsigned int   NonDSCBPP3 = BPP_INVALID;
 
 	if (Format == dm_420) {
 		NonDSCBPP0 = 12;
 		NonDSCBPP1 = 15;
 		NonDSCBPP2 = 18;
 		MinDSCBPP = 6;
-		MaxDSCBPP = 1.5 * DSCInputBitPerComponent - 1 / 16;
+		MaxDSCBPP = 1.5 * DSCInputBitPerComponent - 1.0 / 16;
 	} else if (Format == dm_444) {
-		NonDSCBPP0 = 18;
-		NonDSCBPP1 = 24;
-		NonDSCBPP2 = 30;
-		NonDSCBPP3 = 36;
+		NonDSCBPP3 = 18;
+		NonDSCBPP0 = 24;
+		NonDSCBPP1 = 30;
+		NonDSCBPP2 = 36;
 		MinDSCBPP = 8;
 		MaxDSCBPP = 3 * DSCInputBitPerComponent - 1.0 / 16;
 	} else {
@@ -1652,6 +1652,8 @@ double dml32_TruncToValidBPP(
 			MaxLinkBPP = 2 * MaxLinkBPP;
 	}
 
+	*RequiredSlots = dml_ceil(DesiredBPP / MaxLinkBPP * 64, 1);
+
 	if (DesiredBPP == 0) {
 		if (DSCEnable) {
 			if (MaxLinkBPP < MinDSCBPP)
@@ -1661,29 +1663,25 @@ double dml32_TruncToValidBPP(
 			else
 				return dml_floor(16.0 * MaxLinkBPP, 1.0) / 16.0;
 		} else {
-			if (MaxLinkBPP >= NonDSCBPP3)
-				return NonDSCBPP3;
-			else if (MaxLinkBPP >= NonDSCBPP2)
+			if (MaxLinkBPP >= NonDSCBPP2)
 				return NonDSCBPP2;
 			else if (MaxLinkBPP >= NonDSCBPP1)
 				return NonDSCBPP1;
 			else if (MaxLinkBPP >= NonDSCBPP0)
 				return 16.0;
+			else if ((Output == dm_dp2p0 || Output == dm_dp) && NonDSCBPP3 != BPP_INVALID &&  MaxLinkBPP >= NonDSCBPP3)
+				return NonDSCBPP3; // Special case to allow 6bpc RGB for DP connections.
 			else
 				return BPP_INVALID;
 		}
 	} else {
 		if (!((DSCEnable == false && (DesiredBPP == NonDSCBPP2 || DesiredBPP == NonDSCBPP1 ||
-				DesiredBPP == NonDSCBPP0 || DesiredBPP == NonDSCBPP3)) ||
+				DesiredBPP <= NonDSCBPP0)) ||
 				(DSCEnable && DesiredBPP >= MinDSCBPP && DesiredBPP <= MaxDSCBPP)))
 			return BPP_INVALID;
 		else
 			return DesiredBPP;
 	}
-
-	*RequiredSlots = dml_ceil(DesiredBPP / MaxLinkBPP * 64, 1);
-
-	return BPP_INVALID;
 } // TruncToValidBPP
 
 double dml32_RequiredDTBCLK(
@@ -1979,8 +1977,8 @@ void dml32_CalculateVMRowAndSwath(
 	unsigned int PTEBufferSizeInRequestsForChroma[DC__NUM_DPP__MAX];
 	unsigned int PDEAndMetaPTEBytesFrameY;
 	unsigned int PDEAndMetaPTEBytesFrameC;
-	unsigned int MetaRowByteY[DC__NUM_DPP__MAX];
-	unsigned int MetaRowByteC[DC__NUM_DPP__MAX];
+	unsigned int MetaRowByteY[DC__NUM_DPP__MAX] = {0};
+	unsigned int MetaRowByteC[DC__NUM_DPP__MAX] = {0};
 	unsigned int PixelPTEBytesPerRowY[DC__NUM_DPP__MAX];
 	unsigned int PixelPTEBytesPerRowC[DC__NUM_DPP__MAX];
 	unsigned int PixelPTEBytesPerRowY_one_row_per_frame[DC__NUM_DPP__MAX];
@@ -3427,6 +3425,7 @@ bool dml32_CalculatePrefetchSchedule(
 		unsigned int SwathHeightC,
 		double TWait,
 		double TPreReq,
+		bool ExtendPrefetchIfPossible,
 		/* Output */
 		double   *DSTXAfterScaler,
 		double   *DSTYAfterScaler,
@@ -3463,6 +3462,7 @@ bool dml32_CalculatePrefetchSchedule(
 	double TimeForFetchingMetaPTE = 0;
 	double TimeForFetchingRowInVBlank = 0;
 	double LinesToRequestPrefetchPixelData = 0;
+	double LinesForPrefetchBandwidth = 0;
 	unsigned int HostVMDynamicLevelsTrips;
 	double  trip_to_mem;
 	double  Tvm_trips;
@@ -3892,11 +3892,35 @@ bool dml32_CalculatePrefetchSchedule(
 			TimeForFetchingMetaPTE = Tvm_oto;
 			TimeForFetchingRowInVBlank = Tr0_oto;
 			*PrefetchBandwidth = prefetch_bw_oto;
+			/* Clamp to oto for bandwidth calculation */
+			LinesForPrefetchBandwidth = dst_y_prefetch_oto;
 		} else {
-			*DestinationLinesForPrefetch = dst_y_prefetch_equ;
-			TimeForFetchingMetaPTE = Tvm_equ;
-			TimeForFetchingRowInVBlank = Tr0_equ;
-			*PrefetchBandwidth = prefetch_bw_equ;
+			/* For mode programming we want to extend the prefetch as much as possible
+			 * (up to oto, or as long as we can for equ) if we're not already applying
+			 * the 60us prefetch requirement. This is to avoid intermittent underflow
+			 * issues during prefetch.
+			 *
+			 * The prefetch extension is applied under the following scenarios:
+			 * 1. We're in prefetch mode > 0 (i.e. we don't support MCLK switch in blank)
+			 * 2. We're using subvp or drr methods of p-state switch, in which case we
+			 *    we don't care if prefetch takes up more of the blanking time
+			 *
+			 * Mode programming typically chooses the smallest prefetch time possible
+			 * (i.e. highest bandwidth during prefetch) presumably to create margin between
+			 * p-states / c-states that happen in vblank and prefetch. Therefore we only
+			 * apply this prefetch extension when p-state in vblank is not required (UCLK
+			 * p-states take up the most vblank time).
+			 */
+			if (ExtendPrefetchIfPossible && TPreReq == 0 && VStartup < MaxVStartup) {
+				MyError = true;
+			} else {
+				*DestinationLinesForPrefetch = dst_y_prefetch_equ;
+				TimeForFetchingMetaPTE = Tvm_equ;
+				TimeForFetchingRowInVBlank = Tr0_equ;
+				*PrefetchBandwidth = prefetch_bw_equ;
+				/* Clamp to equ for bandwidth calculation */
+				LinesForPrefetchBandwidth = dst_y_prefetch_equ;
+			}
 		}
 
 		*DestinationLinesToRequestVMInVBlank = dml_ceil(4.0 * TimeForFetchingMetaPTE / LineTime, 1.0) / 4.0;
@@ -3904,7 +3928,7 @@ bool dml32_CalculatePrefetchSchedule(
 		*DestinationLinesToRequestRowInVBlank =
 				dml_ceil(4.0 * TimeForFetchingRowInVBlank / LineTime, 1.0) / 4.0;
 
-		LinesToRequestPrefetchPixelData = *DestinationLinesForPrefetch -
+		LinesToRequestPrefetchPixelData = LinesForPrefetchBandwidth -
 				*DestinationLinesToRequestVMInVBlank - 2 * *DestinationLinesToRequestRowInVBlank;
 
 #ifdef __DML_VBA_DEBUG__
@@ -4077,12 +4101,9 @@ bool dml32_CalculatePrefetchSchedule(
 
 	if (MyError) {
 		*PrefetchBandwidth = 0;
-		TimeForFetchingMetaPTE = 0;
-		TimeForFetchingRowInVBlank = 0;
 		*DestinationLinesToRequestVMInVBlank = 0;
 		*DestinationLinesToRequestRowInVBlank = 0;
 		*DestinationLinesForPrefetch = 0;
-		LinesToRequestPrefetchPixelData = 0;
 		*VRatioPrefetchY = 0;
 		*VRatioPrefetchC = 0;
 		*RequiredPrefetchPixDataBWLuma = 0;
@@ -4128,7 +4149,7 @@ void dml32_CalculateFlipSchedule(
 	unsigned int HostVMDynamicLevelsTrips;
 	double TimeForFetchingMetaPTEImmediateFlip;
 	double TimeForFetchingRowInVBlankImmediateFlip;
-	double ImmediateFlipBW;
+	double ImmediateFlipBW = 1.0;
 
 	if (GPUVMEnable == true && HostVMEnable == true)
 		HostVMDynamicLevelsTrips = HostVMMaxNonCachedPageTableLevels;
@@ -4269,7 +4290,7 @@ void dml32_CalculateWatermarksMALLUseAndDRAMSpeedChangeSupport(
 	unsigned int i, j, k;
 	unsigned int SurfaceWithMinActiveFCLKChangeMargin = 0;
 	unsigned int DRAMClockChangeSupportNumber = 0;
-	unsigned int LastSurfaceWithoutMargin;
+	unsigned int LastSurfaceWithoutMargin = 0;
 	unsigned int DRAMClockChangeMethod = 0;
 	bool FoundFirstSurfaceWithMinActiveFCLKChangeMargin = false;
 	double MinActiveFCLKChangeMargin = 0.;
@@ -4342,7 +4363,7 @@ void dml32_CalculateWatermarksMALLUseAndDRAMSpeedChangeSupport(
 				+ v->WritebackChunkSize * 1024.0 / 32.0 / SOCCLK;
 	}
 	if (v->USRRetrainingRequiredFinal)
-		v->Watermark.WritebackUrgentWatermark = v->Watermark.WritebackUrgentWatermark
+		v->Watermark.WritebackDRAMClockChangeWatermark = v->Watermark.WritebackDRAMClockChangeWatermark
 				+ mmSOCParameters.USRRetrainingLatency;
 
 	if (TotalActiveWriteback <= 1) {
@@ -5634,9 +5655,9 @@ void dml32_CalculateStutterEfficiency(
 	double LastZ8StutterPeriod = 0.0;
 	double LastStutterPeriod = 0.0;
 	unsigned int TotalNumberOfActiveOTG = 0;
-	double doublePixelClock;
-	unsigned int doubleHTotal;
-	unsigned int doubleVTotal;
+	double doublePixelClock = 0;
+	unsigned int doubleHTotal = 0;
+	unsigned int doubleVTotal = 0;
 	bool SameTiming = true;
 	double DETBufferingTimeY;
 	double SwathWidthYCriticalSurface = 0.0;
@@ -6271,7 +6292,8 @@ bool dml32_CalculateDETSwathFillLatencyHiding(unsigned int NumberOfActiveSurface
 		double	PixelClock[],
 		double	VRatioY[],
 		double	VRatioC[],
-		enum dm_use_mall_for_pstate_change_mode UsesMALLForPStateChange[])
+		enum dm_use_mall_for_pstate_change_mode UsesMALLForPStateChange[],
+		enum unbounded_requesting_policy UseUnboundedRequesting)
 {
 	int k;
 	double SwathSizeAllSurfaces = 0;
@@ -6282,6 +6304,9 @@ bool dml32_CalculateDETSwathFillLatencyHiding(unsigned int NumberOfActiveSurface
 	double SwathSizePerSurfaceY[DC__NUM_DPP__MAX];
 	double SwathSizePerSurfaceC[DC__NUM_DPP__MAX];
 	bool NotEnoughDETSwathFillLatencyHiding = false;
+
+	if (UseUnboundedRequesting == dm_unbounded_requesting)
+		return false;
 
 	/* calculate sum of single swath size for all pipes in bytes */
 	for (k = 0; k < NumberOfActiveSurfaces; k++) {

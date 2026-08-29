@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _UDP6_IMPL_H
 #define _UDP6_IMPL_H
+#include <net/aligned_data.h>
 #include <net/udp.h>
 #include <net/udplite.h>
 #include <net/protocol.h>
@@ -21,8 +22,7 @@ int udpv6_getsockopt(struct sock *sk, int level, int optname,
 int udpv6_setsockopt(struct sock *sk, int level, int optname, sockptr_t optval,
 		     unsigned int optlen);
 int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
-int udpv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags,
-		  int *addr_len);
+int udpv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags);
 void udpv6_destroy_sock(struct sock *sk);
 
 #ifdef CONFIG_PROC_FS

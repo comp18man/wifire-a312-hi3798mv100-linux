@@ -23,7 +23,6 @@
 #include <linux/pm_runtime.h>
 #include <linux/davinci_emac.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_mdio.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/mdio-bitbang.h>
@@ -512,16 +511,12 @@ static const struct k3_mdio_soc_data am65_mdio_soc_data = {
 };
 
 static const struct soc_device_attribute k3_mdio_socinfo[] = {
-	{ .family = "AM62X", .revision = "SR1.0", .data = &am65_mdio_soc_data },
-	{ .family = "AM64X", .revision = "SR1.0", .data = &am65_mdio_soc_data },
-	{ .family = "AM64X", .revision = "SR2.0", .data = &am65_mdio_soc_data },
-	{ .family = "AM65X", .revision = "SR1.0", .data = &am65_mdio_soc_data },
-	{ .family = "AM65X", .revision = "SR2.0", .data = &am65_mdio_soc_data },
-	{ .family = "J7200", .revision = "SR1.0", .data = &am65_mdio_soc_data },
-	{ .family = "J7200", .revision = "SR2.0", .data = &am65_mdio_soc_data },
-	{ .family = "J721E", .revision = "SR1.0", .data = &am65_mdio_soc_data },
-	{ .family = "J721E", .revision = "SR2.0", .data = &am65_mdio_soc_data },
-	{ .family = "J721S2", .revision = "SR1.0", .data = &am65_mdio_soc_data},
+	{ .family = "AM62X", .data = &am65_mdio_soc_data },
+	{ .family = "AM64X", .data = &am65_mdio_soc_data },
+	{ .family = "AM65X", .data = &am65_mdio_soc_data },
+	{ .family = "J7200", .data = &am65_mdio_soc_data },
+	{ .family = "J721E", .data = &am65_mdio_soc_data },
+	{ .family = "J721S2", .data = &am65_mdio_soc_data },
 	{ /* sentinel */ },
 };
 
@@ -674,7 +669,7 @@ bail_out:
 	return ret;
 }
 
-static int davinci_mdio_remove(struct platform_device *pdev)
+static void davinci_mdio_remove(struct platform_device *pdev)
 {
 	struct davinci_mdio_data *data = platform_get_drvdata(pdev);
 
@@ -687,8 +682,6 @@ static int davinci_mdio_remove(struct platform_device *pdev)
 
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM

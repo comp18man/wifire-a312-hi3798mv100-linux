@@ -41,7 +41,6 @@ static int host1x_subdev_add(struct host1x_device *device,
 			     struct device_node *np)
 {
 	struct host1x_subdev *subdev;
-	struct device_node *child;
 	int err;
 
 	subdev = kzalloc(sizeof(*subdev), GFP_KERNEL);
@@ -56,13 +55,12 @@ static int host1x_subdev_add(struct host1x_device *device,
 	mutex_unlock(&device->subdevs_lock);
 
 	/* recursively add children */
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		if (of_match_node(driver->subdevs, child) &&
 		    of_device_is_available(child)) {
 			err = host1x_subdev_add(device, driver, child);
 			if (err < 0) {
 				/* XXX cleanup? */
-				of_node_put(child);
 				return err;
 			}
 		}
@@ -90,17 +88,14 @@ static void host1x_subdev_del(struct host1x_subdev *subdev)
 static int host1x_device_parse_dt(struct host1x_device *device,
 				  struct host1x_driver *driver)
 {
-	struct device_node *np;
 	int err;
 
-	for_each_child_of_node(device->dev.parent->of_node, np) {
+	for_each_child_of_node_scoped(device->dev.parent->of_node, np) {
 		if (of_match_node(driver->subdevs, np) &&
 		    of_device_is_available(np)) {
 			err = host1x_subdev_add(device, driver, np);
-			if (err < 0) {
-				of_node_put(np);
+			if (err < 0)
 				return err;
-			}
 		}
 	}
 
@@ -333,44 +328,22 @@ static int host1x_del_client(struct host1x *host1x,
 	return -ENODEV;
 }
 
-static int host1x_device_match(struct device *dev, struct device_driver *drv)
+static int host1x_device_match(struct device *dev, const struct device_driver *drv)
 {
 	return strcmp(dev_name(dev), drv->name) == 0;
 }
 
+/*
+ * Note that this is really only needed for backwards compatibility
+ * with libdrm, which parses this information from sysfs and will
+ * fail if it can't find the OF_FULLNAME, specifically.
+ */
 static int host1x_device_uevent(const struct device *dev,
 				struct kobj_uevent_env *env)
 {
-	struct device_node *np = dev->parent->of_node;
-	unsigned int count = 0;
-	struct property *p;
-	const char *compat;
-
-	/*
-	 * This duplicates most of of_device_uevent(), but the latter cannot
-	 * be called from modules and operates on dev->of_node, which is not
-	 * available in this case.
-	 *
-	 * Note that this is really only needed for backwards compatibility
-	 * with libdrm, which parses this information from sysfs and will
-	 * fail if it can't find the OF_FULLNAME, specifically.
-	 */
-	add_uevent_var(env, "OF_NAME=%pOFn", np);
-	add_uevent_var(env, "OF_FULLNAME=%pOF", np);
-
-	of_property_for_each_string(np, "compatible", p, compat) {
-		add_uevent_var(env, "OF_COMPATIBLE_%u=%s", count, compat);
-		count++;
-	}
-
-	add_uevent_var(env, "OF_COMPATIBLE_N=%u", count);
+	of_device_uevent(dev->parent, env);
 
 	return 0;
-}
-
-static int host1x_dma_configure(struct device *dev)
-{
-	return of_dma_configure(dev, dev->of_node, true);
 }
 
 static const struct dev_pm_ops host1x_device_pm_ops = {
@@ -382,11 +355,10 @@ static const struct dev_pm_ops host1x_device_pm_ops = {
 	.restore = pm_generic_restore,
 };
 
-struct bus_type host1x_bus_type = {
+const struct bus_type host1x_bus_type = {
 	.name = "host1x",
 	.match = host1x_device_match,
 	.uevent = host1x_device_uevent,
-	.dma_configure = host1x_dma_configure,
 	.pm = &host1x_device_pm_ops,
 };
 
@@ -475,14 +447,12 @@ static int host1x_device_add(struct host1x *host1x,
 	device->dev.bus = &host1x_bus_type;
 	device->dev.parent = host1x->dev;
 
-	of_dma_configure(&device->dev, host1x->dev->of_node, true);
-
 	device->dev.dma_parms = &device->dma_parms;
 	dma_set_max_seg_size(&device->dev, UINT_MAX);
 
 	err = host1x_device_parse_dt(device, driver);
 	if (err < 0) {
-		kfree(device);
+		put_device(&device->dev);
 		return err;
 	}
 
@@ -803,7 +773,7 @@ EXPORT_SYMBOL(__host1x_client_register);
  * Removes a host1x client from its host1x controller instance. If a logical
  * device has already been initialized, it will be torn down.
  */
-int host1x_client_unregister(struct host1x_client *client)
+void host1x_client_unregister(struct host1x_client *client)
 {
 	struct host1x_client *c;
 	struct host1x *host1x;
@@ -815,7 +785,7 @@ int host1x_client_unregister(struct host1x_client *client)
 		err = host1x_del_client(host1x, client);
 		if (!err) {
 			mutex_unlock(&devices_lock);
-			return 0;
+			return;
 		}
 	}
 
@@ -832,8 +802,6 @@ int host1x_client_unregister(struct host1x_client *client)
 	mutex_unlock(&clients_lock);
 
 	host1x_bo_cache_destroy(&client->cache);
-
-	return 0;
 }
 EXPORT_SYMBOL(host1x_client_unregister);
 
@@ -908,6 +876,20 @@ unlock:
 }
 EXPORT_SYMBOL(host1x_client_resume);
 
+/**
+ * host1x_bo_pin() - Create a DMA mapping for the buffer object
+ * @dev: Device onto which DMA map to
+ * @bo: Buffer object to map
+ * @dir: DMA direction
+ * @cache: Cache in which to store mapping, or NULL
+ *
+ * Creates a DMA mapping pointing to @bo for @dev. The refcount of @bo is incremented
+ * until host1x_bo_unpin is called.
+ *
+ * If @cache is specified, the mapping is also stored in the cache and not released
+ * until @bo is freed (refcount drops to zero). This improves performance when a buffer
+ * is pinned and unpinned frequently as in the case of display use.
+ */
 struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo,
 					enum dma_data_direction dir,
 					struct host1x_bo_cache *cache)
@@ -920,6 +902,7 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 		list_for_each_entry(mapping, &cache->mappings, entry) {
 			if (mapping->bo == bo && mapping->direction == dir) {
 				kref_get(&mapping->ref);
+				host1x_bo_get(bo);
 				goto unlock;
 			}
 		}
@@ -928,6 +911,8 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 	mapping = bo->ops->pin(dev, bo, dir);
 	if (IS_ERR(mapping))
 		goto unlock;
+
+	host1x_bo_get(bo);
 
 	spin_lock(&mapping->bo->lock);
 	list_add_tail(&mapping->list, &bo->mappings);
@@ -939,7 +924,12 @@ struct host1x_bo_mapping *host1x_bo_pin(struct device *dev, struct host1x_bo *bo
 
 		list_add_tail(&mapping->entry, &cache->mappings);
 
-		/* bump reference count to track the copy in the cache */
+		/*
+		 * Bump the mapping reference count to track the mapping in the cache,
+		 * but do not bump the BO's refcount. This allows the BO to still get freed,
+		 * triggering the release of the cache mapping through
+		 * host1x_bo_clear_cached_mappings.
+		 */
 		kref_get(&mapping->ref);
 	}
 
@@ -969,9 +959,17 @@ static void __host1x_bo_unpin(struct kref *ref)
 	mapping->bo->ops->unpin(mapping);
 }
 
+/**
+ * host1x_bo_unpin() - Release an established DMA mapping of a buffer object
+ * @mapping: Mapping to release
+ *
+ * Unmaps the given @mapping, unless it is cached. Decreases the refcount on
+ * the underlying buffer object.
+ */
 void host1x_bo_unpin(struct host1x_bo_mapping *mapping)
 {
 	struct host1x_bo_cache *cache = mapping->cache;
+	struct host1x_bo *bo = mapping->bo;
 
 	if (cache)
 		mutex_lock(&cache->lock);
@@ -980,5 +978,33 @@ void host1x_bo_unpin(struct host1x_bo_mapping *mapping)
 
 	if (cache)
 		mutex_unlock(&cache->lock);
+
+	host1x_bo_put(bo);
 }
 EXPORT_SYMBOL(host1x_bo_unpin);
+
+/**
+ * host1x_bo_clear_cached_mappings() - Remove all cached mappings pointing at a bo
+ * @bo: Buffer object to release mappings of
+ *
+ * Drops references to any mappings pointing to @bo left in any caches. This must
+ * be called by any host1x_bo implementers that may be pinned with caching enabled
+ * before freeing the bo.
+ */
+void host1x_bo_clear_cached_mappings(struct host1x_bo *bo)
+{
+	struct host1x_bo_mapping *mapping, *tmp;
+	struct host1x_bo_cache *cache;
+
+	list_for_each_entry_safe(mapping, tmp, &bo->mappings, list) {
+		cache = mapping->cache;
+		if (WARN_ON(!cache))
+			continue;
+
+		mutex_lock(&cache->lock);
+		WARN_ON(kref_read(&mapping->ref) != 1);
+		__host1x_bo_unpin(&mapping->ref);
+		mutex_unlock(&cache->lock);
+	}
+}
+EXPORT_SYMBOL(host1x_bo_clear_cached_mappings);

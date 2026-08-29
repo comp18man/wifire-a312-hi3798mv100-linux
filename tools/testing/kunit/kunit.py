@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import kunit_json
 import kunit_kernel
 import kunit_parser
-from kunit_printer import stdout
+from kunit_printer import stdout, null_printer
 
 class KunitStatus(Enum):
 	SUCCESS = auto()
@@ -49,14 +49,20 @@ class KunitBuildRequest(KunitConfigRequest):
 class KunitParseRequest:
 	raw_output: Optional[str]
 	json: Optional[str]
+	summary: bool
+	failed: bool
 
 @dataclass
 class KunitExecRequest(KunitParseRequest):
 	build_dir: str
 	timeout: int
 	filter_glob: str
+	filter: str
+	filter_action: Optional[str]
 	kernel_args: Optional[List[str]]
 	run_isolated: Optional[str]
+	list_tests: bool
+	list_tests_attr: bool
 
 @dataclass
 class KunitRequest(KunitExecRequest, KunitBuildRequest):
@@ -102,19 +108,41 @@ def config_and_build_tests(linux: kunit_kernel.LinuxSourceTree,
 
 def _list_tests(linux: kunit_kernel.LinuxSourceTree, request: KunitExecRequest) -> List[str]:
 	args = ['kunit.action=list']
+
 	if request.kernel_args:
 		args.extend(request.kernel_args)
 
 	output = linux.run_kernel(args=args,
 			   timeout=request.timeout,
 			   filter_glob=request.filter_glob,
+			   filter=request.filter,
+			   filter_action=request.filter_action,
 			   build_dir=request.build_dir)
 	lines = kunit_parser.extract_tap_lines(output)
 	# Hack! Drop the dummy TAP version header that the executor prints out.
 	lines.pop()
 
 	# Filter out any extraneous non-test output that might have gotten mixed in.
-	return [l for l in lines if re.match(r'^[^\s.]+\.[^\s.]+$', l)]
+	return [l for l in output if re.match(r'^[^\s.]+\.[^\s.]+$', l)]
+
+def _list_tests_attr(linux: kunit_kernel.LinuxSourceTree, request: KunitExecRequest) -> Iterable[str]:
+	args = ['kunit.action=list_attr']
+
+	if request.kernel_args:
+		args.extend(request.kernel_args)
+
+	output = linux.run_kernel(args=args,
+			   timeout=request.timeout,
+			   filter_glob=request.filter_glob,
+			   filter=request.filter,
+			   filter_action=request.filter_action,
+			   build_dir=request.build_dir)
+	lines = kunit_parser.extract_tap_lines(output)
+	# Hack! Drop the dummy TAP version header that the executor prints out.
+	lines.pop()
+
+	# Filter out any extraneous non-test output that might have gotten mixed in.
+	return lines
 
 def _suites_from_test_list(tests: List[str]) -> List[str]:
 	"""Extracts all the suites from an ordered list of tests."""
@@ -123,15 +151,23 @@ def _suites_from_test_list(tests: List[str]) -> List[str]:
 		parts = t.split('.', maxsplit=2)
 		if len(parts) != 2:
 			raise ValueError(f'internal KUnit error, test name should be of the form "<suite>.<test>", got "{t}"')
-		suite, case = parts
+		suite, _ = parts
 		if not suites or suites[-1] != suite:
 			suites.append(suite)
 	return suites
 
-
-
 def exec_tests(linux: kunit_kernel.LinuxSourceTree, request: KunitExecRequest) -> KunitResult:
 	filter_globs = [request.filter_glob]
+	if request.list_tests:
+		output = _list_tests(linux, request)
+		for line in output:
+			print(line.rstrip())
+		return KunitResult(status=KunitStatus.SUCCESS, elapsed_time=0.0)
+	if request.list_tests_attr:
+		attr_output = _list_tests_attr(linux, request)
+		for line in attr_output:
+			print(line.rstrip())
+		return KunitResult(status=KunitStatus.SUCCESS, elapsed_time=0.0)
 	if request.run_isolated:
 		tests = _list_tests(linux, request)
 		if request.run_isolated == 'test':
@@ -155,6 +191,8 @@ def exec_tests(linux: kunit_kernel.LinuxSourceTree, request: KunitExecRequest) -
 			args=request.kernel_args,
 			timeout=request.timeout,
 			filter_glob=filter_glob,
+			filter=request.filter,
+			filter_action=request.filter_action,
 			build_dir=request.build_dir)
 
 		_, test_result = parse_tests(request, metadata, run_result)
@@ -190,7 +228,7 @@ def parse_tests(request: KunitParseRequest, metadata: kunit_json.Metadata, input
 		fake_test.counts.passed = 1
 
 		output: Iterable[str] = input_data
-		if request.raw_output == 'all':
+		if request.raw_output == 'all' or request.raw_output == 'full':
 			pass
 		elif request.raw_output == 'kunit':
 			output = kunit_parser.extract_tap_lines(output)
@@ -199,10 +237,17 @@ def parse_tests(request: KunitParseRequest, metadata: kunit_json.Metadata, input
 		parse_time = time.time() - parse_start
 		return KunitResult(KunitStatus.SUCCESS, parse_time), fake_test
 
+	default_printer = stdout
+	if request.summary or request.failed:
+		default_printer = null_printer
 
 	# Actually parse the test results.
-	test = kunit_parser.parse_run_tests(input_data)
+	test = kunit_parser.parse_run_tests(input_data, default_printer)
 	parse_time = time.time() - parse_start
+
+	if request.failed:
+		kunit_parser.print_test(test, request.failed, stdout)
+	kunit_parser.print_summary_line(test, stdout)
 
 	if request.json:
 		json_str = kunit_json.get_json_result(
@@ -267,9 +312,18 @@ def massage_argv(argv: Sequence[str]) -> Sequence[str]:
 	return list(map(massage_arg, argv))
 
 def get_default_jobs() -> int:
-	return len(os.sched_getaffinity(0))
+	if sys.version_info >= (3, 13):
+		if (ncpu := os.process_cpu_count()) is not None:
+			return ncpu
+		raise RuntimeError("os.process_cpu_count() returned None")
+	 # See https://github.com/python/cpython/blob/b61fece/Lib/os.py#L1175-L1186.
+	if sys.platform != "darwin":
+		return len(os.sched_getaffinity(0))
+	if (ncpu := os.cpu_count()) is not None:
+		return ncpu
+	raise RuntimeError("os.cpu_count() returned None")
 
-def add_common_opts(parser) -> None:
+def add_common_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--build_dir',
 			    help='As in the make command, it specifies the build '
 			    'directory.',
@@ -320,13 +374,13 @@ def add_common_opts(parser) -> None:
 			    help='Additional QEMU arguments, e.g. "-smp 8"',
 			    action='append', metavar='')
 
-def add_build_opts(parser) -> None:
+def add_build_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--jobs',
 			    help='As in the make command, "Specifies  the number of '
 			    'jobs (commands) to run simultaneously."',
 			    type=int, default=get_default_jobs(), metavar='N')
 
-def add_exec_opts(parser) -> None:
+def add_exec_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--timeout',
 			    help='maximum number of seconds to allow for all tests '
 			    'to run. This does not include time taken to build the '
@@ -341,6 +395,16 @@ def add_exec_opts(parser) -> None:
 			    nargs='?',
 			    default='',
 			    metavar='filter_glob')
+	parser.add_argument('--filter',
+			    help='Filter KUnit tests with attributes, '
+			    'e.g. module=example or speed>slow',
+			    type=str,
+				default='')
+	parser.add_argument('--filter_action',
+			    help='If set to skip, filtered tests will be skipped, '
+				'e.g. --filter_action=skip. Otherwise they will not run.',
+			    type=str,
+				choices=['skip'])
 	parser.add_argument('--kernel_args',
 			    help='Kernel command-line parameters. Maybe be repeated',
 			     action='append', metavar='')
@@ -350,17 +414,31 @@ def add_exec_opts(parser) -> None:
 			    'what ran before it.',
 			    type=str,
 			    choices=['suite', 'test'])
+	parser.add_argument('--list_tests', help='If set, list all tests that will be '
+			    'run.',
+			    action='store_true')
+	parser.add_argument('--list_tests_attr', help='If set, list all tests and test '
+			    'attributes.',
+			    action='store_true')
 
-def add_parse_opts(parser) -> None:
+def add_parse_opts(parser: argparse.ArgumentParser) -> None:
 	parser.add_argument('--raw_output', help='If set don\'t parse output from kernel. '
 			    'By default, filters to just KUnit output. Use '
 			    '--raw_output=all to show everything',
-			     type=str, nargs='?', const='all', default=None, choices=['all', 'kunit'])
+			     type=str, nargs='?', const='all', default=None, choices=['all', 'full', 'kunit'])
 	parser.add_argument('--json',
 			    nargs='?',
 			    help='Prints parsed test results as JSON to stdout or a file if '
 			    'a filename is specified. Does nothing if --raw_output is set.',
 			    type=str, const='stdout', default=None, metavar='FILE')
+	parser.add_argument('--summary',
+			    help='Prints only the summary line for parsed test results.'
+				'Does nothing if --raw_output is set.',
+			    action='store_true')
+	parser.add_argument('--failed',
+			    help='Prints only the failed parsed test results and summary line.'
+				'Does nothing if --raw_output is set.',
+			    action='store_true')
 
 
 def tree_from_args(cli_args: argparse.Namespace) -> kunit_kernel.LinuxSourceTree:
@@ -386,7 +464,7 @@ def tree_from_args(cli_args: argparse.Namespace) -> kunit_kernel.LinuxSourceTree
 			extra_qemu_args=qemu_args)
 
 
-def run_handler(cli_args):
+def run_handler(cli_args: argparse.Namespace) -> None:
 	if not os.path.exists(cli_args.build_dir):
 		os.mkdir(cli_args.build_dir)
 
@@ -396,16 +474,22 @@ def run_handler(cli_args):
 					jobs=cli_args.jobs,
 					raw_output=cli_args.raw_output,
 					json=cli_args.json,
+					summary=cli_args.summary,
+					failed=cli_args.failed,
 					timeout=cli_args.timeout,
 					filter_glob=cli_args.filter_glob,
+					filter=cli_args.filter,
+					filter_action=cli_args.filter_action,
 					kernel_args=cli_args.kernel_args,
-					run_isolated=cli_args.run_isolated)
+					run_isolated=cli_args.run_isolated,
+					list_tests=cli_args.list_tests,
+					list_tests_attr=cli_args.list_tests_attr)
 	result = run_tests(linux, request)
 	if result.status != KunitStatus.SUCCESS:
 		sys.exit(1)
 
 
-def config_handler(cli_args):
+def config_handler(cli_args: argparse.Namespace) -> None:
 	if cli_args.build_dir and (
 			not os.path.exists(cli_args.build_dir)):
 		os.mkdir(cli_args.build_dir)
@@ -421,7 +505,7 @@ def config_handler(cli_args):
 		sys.exit(1)
 
 
-def build_handler(cli_args):
+def build_handler(cli_args: argparse.Namespace) -> None:
 	linux = tree_from_args(cli_args)
 	request = KunitBuildRequest(build_dir=cli_args.build_dir,
 					make_options=cli_args.make_options,
@@ -434,15 +518,21 @@ def build_handler(cli_args):
 		sys.exit(1)
 
 
-def exec_handler(cli_args):
+def exec_handler(cli_args: argparse.Namespace) -> None:
 	linux = tree_from_args(cli_args)
 	exec_request = KunitExecRequest(raw_output=cli_args.raw_output,
 					build_dir=cli_args.build_dir,
 					json=cli_args.json,
+					summary=cli_args.summary,
+					failed=cli_args.failed,
 					timeout=cli_args.timeout,
 					filter_glob=cli_args.filter_glob,
+					filter=cli_args.filter,
+					filter_action=cli_args.filter_action,
 					kernel_args=cli_args.kernel_args,
-					run_isolated=cli_args.run_isolated)
+					run_isolated=cli_args.run_isolated,
+					list_tests=cli_args.list_tests,
+					list_tests_attr=cli_args.list_tests_attr)
 	result = exec_tests(linux, exec_request)
 	stdout.print_with_timestamp((
 		'Elapsed time: %.3fs\n') % (result.elapsed_time))
@@ -450,17 +540,18 @@ def exec_handler(cli_args):
 		sys.exit(1)
 
 
-def parse_handler(cli_args):
+def parse_handler(cli_args: argparse.Namespace) -> None:
 	if cli_args.file is None:
-		sys.stdin.reconfigure(errors='backslashreplace')  # pytype: disable=attribute-error
-		kunit_output = sys.stdin
+		sys.stdin.reconfigure(errors='backslashreplace')  # type: ignore
+		kunit_output = sys.stdin  # type: Iterable[str]
 	else:
 		with open(cli_args.file, 'r', errors='backslashreplace') as f:
 			kunit_output = f.read().splitlines()
 	# We know nothing about how the result was created!
 	metadata = kunit_json.Metadata()
 	request = KunitParseRequest(raw_output=cli_args.raw_output,
-					json=cli_args.json)
+					json=cli_args.json, summary=cli_args.summary,
+					failed=cli_args.failed)
 	result, _ = parse_tests(request, metadata, kunit_output)
 	if result.status != KunitStatus.SUCCESS:
 		sys.exit(1)
@@ -475,7 +566,7 @@ subcommand_handlers_map = {
 }
 
 
-def main(argv):
+def main(argv: Sequence[str]) -> None:
 	parser = argparse.ArgumentParser(
 			description='Helps writing and running KUnit tests.')
 	subparser = parser.add_subparsers(dest='subcommand')

@@ -44,6 +44,7 @@
 #include <linux/ipv6.h>
 #include <linux/indirect_call_wrapper.h>
 #include <net/ipv6.h>
+#include <net/page_pool/helpers.h>
 
 #include "mlx4_en.h"
 
@@ -228,7 +229,9 @@ void mlx4_en_deactivate_tx_ring(struct mlx4_en_priv *priv,
 
 static inline bool mlx4_en_is_tx_ring_full(struct mlx4_en_tx_ring *ring)
 {
-	return ring->prod - ring->cons > ring->full_size;
+	u32 used = READ_ONCE(ring->prod) - READ_ONCE(ring->cons);
+
+	return used > ring->full_size;
 }
 
 static void mlx4_en_stamp_wqe(struct mlx4_en_priv *priv,
@@ -348,16 +351,10 @@ u32 mlx4_en_recycle_tx_desc(struct mlx4_en_priv *priv,
 			    int napi_mode)
 {
 	struct mlx4_en_tx_info *tx_info = &ring->tx_info[index];
-	struct mlx4_en_rx_alloc frame = {
-		.page = tx_info->page,
-		.dma = tx_info->map0_dma,
-	};
+	struct page_pool *pool = ring->recycle_ring->pp;
 
-	if (!napi_mode || !mlx4_en_rx_recycle(ring->recycle_ring, &frame)) {
-		dma_unmap_page(priv->ddev, tx_info->map0_dma,
-			       PAGE_SIZE, priv->dma_dir);
-		put_page(tx_info->page);
-	}
+	/* Note that napi_mode = 0 means ndo_close() path, not budget = 0 */
+	page_pool_put_full_page(pool, tx_info->page, !!napi_mode);
 
 	return tx_info->nr_txbb;
 }
@@ -447,6 +444,8 @@ int mlx4_en_process_tx_cq(struct net_device *dev,
 	u32 ring_cons;
 
 	if (unlikely(!priv->port_up))
+		return 0;
+	if (unlikely(!napi_budget) && cq->type == TX_XDP)
 		return 0;
 
 	netdev_txq_bql_complete_prefetchw(ring->tx_queue);
@@ -990,7 +989,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 		tx_info->ts_requested = 1;
 	}
 
-	/* Prepare ctrl segement apart opcode+ownership, which depends on
+	/* Prepare ctrl segment apart opcode+ownership, which depends on
 	 * whether LSO is used */
 	tx_desc->ctrl.srcrb_flags = priv->ctrl_flags;
 	if (likely(skb->ip_summed == CHECKSUM_PARTIAL)) {
@@ -1083,7 +1082,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 			op_own |= cpu_to_be32(MLX4_WQE_CTRL_IIP);
 	}
 
-	ring->prod += nr_txbb;
+	WRITE_ONCE(ring->prod, ring->prod + nr_txbb);
 
 	/* If we used a bounce buffer then copy descriptor back into place */
 	if (unlikely(bounce))
@@ -1192,7 +1191,7 @@ netdev_tx_t mlx4_en_xmit_frame(struct mlx4_en_rx_ring *rx_ring,
 	tx_desc = ring->buf + (index << LOG_TXBB_SIZE);
 	data = &tx_desc->data;
 
-	dma = frame->dma;
+	dma = page_pool_get_dma_addr(frame->page);
 
 	tx_info->page = frame->page;
 	frame->page = NULL;
@@ -1214,7 +1213,7 @@ netdev_tx_t mlx4_en_xmit_frame(struct mlx4_en_rx_ring *rx_ring,
 
 	rx_ring->xdp_tx++;
 
-	ring->prod += MLX4_EN_XDP_TX_NRTXBB;
+	WRITE_ONCE(ring->prod, ring->prod + MLX4_EN_XDP_TX_NRTXBB);
 
 	/* Ensure new descriptor hits memory
 	 * before setting ownership of this descriptor to HW

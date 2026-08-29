@@ -22,11 +22,12 @@
  * Authors: AMD
  *
  */
+
 #ifndef __LINK_HWSS_DIO_H__
 #define __LINK_HWSS_DIO_H__
 
 #include "link_hwss.h"
-#include "link.h"
+#include "link_service.h"
 
 const struct link_hwss *get_dio_link_hwss(void);
 bool can_use_dio_link_hwss(const struct dc_link *link,
@@ -55,5 +56,8 @@ void setup_dio_audio_output(struct pipe_ctx *pipe_ctx,
 		struct audio_output *audio_output, uint32_t audio_inst);
 void enable_dio_audio_packet(struct pipe_ctx *pipe_ctx);
 void disable_dio_audio_packet(struct pipe_ctx *pipe_ctx);
+void update_dio_stream_allocation_table(struct dc_link *link,
+		const struct link_resource *link_res,
+		const struct link_mst_stream_allocation_table *table);
 
 #endif /* __LINK_HWSS_DIO_H__ */

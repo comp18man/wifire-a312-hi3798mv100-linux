@@ -7,6 +7,7 @@ Human Interface Devices (HID)
 .. toctree::
    :maxdepth: 1
 
+   hidintro
    hiddev
    hidraw
    hid-sensor
@@ -17,4 +18,5 @@ Human Interface Devices (HID)
 
    hid-alps
    intel-ish-hid
+   intel-thc-hid
    amd-sfh-hid

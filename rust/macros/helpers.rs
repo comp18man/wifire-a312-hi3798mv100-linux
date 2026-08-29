@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use proc_macro::{token_stream, TokenTree};
+use proc_macro::{token_stream, Group, Ident, TokenStream, TokenTree};
 
 pub(crate) fn try_ident(it: &mut token_stream::IntoIter) -> Option<String> {
     if let Some(TokenTree::Ident(ident)) = it.next() {
@@ -56,8 +56,50 @@ pub(crate) fn expect_string_ascii(it: &mut token_stream::IntoIter) -> String {
     string
 }
 
+pub(crate) fn expect_group(it: &mut token_stream::IntoIter) -> Group {
+    if let TokenTree::Group(group) = it.next().expect("Reached end of token stream for Group") {
+        group
+    } else {
+        panic!("Expected Group");
+    }
+}
+
 pub(crate) fn expect_end(it: &mut token_stream::IntoIter) {
     if it.next().is_some() {
         panic!("Expected end");
+    }
+}
+
+/// Given a function declaration, finds the name of the function.
+pub(crate) fn function_name(input: TokenStream) -> Option<Ident> {
+    let mut input = input.into_iter();
+    while let Some(token) = input.next() {
+        match token {
+            TokenTree::Ident(i) if i.to_string() == "fn" => {
+                if let Some(TokenTree::Ident(i)) = input.next() {
+                    return Some(i);
+                }
+                return None;
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+pub(crate) fn file() -> String {
+    #[cfg(not(CONFIG_RUSTC_HAS_SPAN_FILE))]
+    {
+        proc_macro::Span::call_site()
+            .source_file()
+            .path()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[cfg(CONFIG_RUSTC_HAS_SPAN_FILE)]
+    #[allow(clippy::incompatible_msrv)]
+    {
+        proc_macro::Span::call_site().file()
     }
 }

@@ -30,7 +30,7 @@
 #include "link_dp_phy.h"
 #define DC_LOGGER \
 	link->ctx->logger
-bool dc_link_dp_perform_link_training_skip_aux(
+bool dp_perform_link_training_skip_aux(
 	struct dc_link *link,
 	const struct link_resource *link_res,
 	const struct dc_link_settings *link_setting)
@@ -39,6 +39,7 @@ bool dc_link_dp_perform_link_training_skip_aux(
 
 	dp_decide_training_settings(
 			link,
+			link_res,
 			link_setting,
 			&lt_settings);
 	override_training_settings(

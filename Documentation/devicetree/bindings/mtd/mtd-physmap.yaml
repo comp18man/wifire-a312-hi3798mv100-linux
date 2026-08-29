@@ -14,7 +14,7 @@ description: |
   file systems on embedded devices.
 
 allOf:
-  - $ref: "mtd.yaml#"
+  - $ref: mtd.yaml#
   - $ref: /schemas/memory-controllers/mc-peripheral-props.yaml#
 
 properties:
@@ -122,6 +122,8 @@ properties:
   '#size-cells':
     const: 1
 
+  ranges: true
+
   big-endian: true
   little-endian: true
 
@@ -143,8 +145,7 @@ then:
   required:
     - syscon
 
-# FIXME: A parent bus may define timing properties
-additionalProperties: true
+unevaluatedProperties: false
 
 examples:
   - |
@@ -164,7 +165,7 @@ examples:
             reg = <0 0xf80000>;
         };
         firmware@f80000 {
-            label ="firmware";
+            label = "firmware";
             reg = <0xf80000 0x80000>;
             read-only;
         };

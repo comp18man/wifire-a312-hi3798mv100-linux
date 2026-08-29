@@ -225,6 +225,7 @@ enum media_pad_signal_type {
  * @graph_obj:	Embedded structure containing the media object common data
  * @entity:	Entity this pad belongs to
  * @index:	Pad index in the entity pads array, numbered from 0 to n
+ * @num_links:	Number of links connected to this pad
  * @sig_type:	Type of the signal inside a media pad
  * @flags:	Pad flags, as defined in
  *		:ref:`include/uapi/linux/media.h <media_header>`
@@ -236,6 +237,7 @@ struct media_pad {
 	struct media_gobj graph_obj;	/* must be first field in struct */
 	struct media_entity *entity;
 	u16 index;
+	u16 num_links;
 	enum media_pad_signal_type sig_type;
 	unsigned long flags;
 
@@ -337,10 +339,6 @@ enum media_entity_type {
  * @info.dev:	Contains device major and minor info.
  * @info.dev.major: device node major, if the device is a devnode.
  * @info.dev.minor: device node minor, if the device is a devnode.
- * @major:	Devnode major number (zero if not applicable). Kept just
- *		for backward compatibility.
- * @minor:	Devnode minor number (zero if not applicable). Kept just
- *		for backward compatibility.
  *
  * .. note::
  *
@@ -741,7 +739,7 @@ static inline void media_entity_cleanup(struct media_entity *entity) {}
  * media_get_pad_index() - retrieves a pad index from an entity
  *
  * @entity:	entity where the pads belong
- * @is_sink:	true if the pad is a sink, false if it is a source
+ * @pad_type:	the type of the pad, one of MEDIA_PAD_FL_* pad types
  * @sig_type:	type of signal of the pad to be search
  *
  * This helper function finds the first pad index inside an entity that
@@ -752,7 +750,7 @@ static inline void media_entity_cleanup(struct media_entity *entity) {}
  * On success, return the pad number. If the pad was not found or the media
  * entity is a NULL pointer, return -EINVAL.
  */
-int media_get_pad_index(struct media_entity *entity, bool is_sink,
+int media_get_pad_index(struct media_entity *entity, u32 pad_type,
 			enum media_pad_signal_type sig_type);
 
 /**
@@ -1079,7 +1077,7 @@ struct media_pipeline *media_pad_pipeline(struct media_pad *pad);
  * Return: returns the pad number on success or a negative error code.
  */
 int media_entity_get_fwnode_pad(struct media_entity *entity,
-				struct fwnode_handle *fwnode,
+				const struct fwnode_handle *fwnode,
 				unsigned long direction_flags);
 
 /**
@@ -1145,10 +1143,10 @@ struct media_entity *media_graph_walk_next(struct media_graph *graph);
 
 /**
  * media_pipeline_start - Mark a pipeline as streaming
- * @pad: Starting pad
+ * @origin: Starting pad
  * @pipe: Media pipeline to be assigned to all pads in the pipeline.
  *
- * Mark all pads connected to a given pad through enabled links, either
+ * Mark all pads connected to pad @origin through enabled links, either
  * directly or indirectly, as streaming. The given pipeline object is assigned
  * to every pad in the pipeline and stored in the media_pad pipe field.
  *
@@ -1157,17 +1155,17 @@ struct media_entity *media_graph_walk_next(struct media_graph *graph);
  * pipeline pointer must be identical for all nested calls to
  * media_pipeline_start().
  */
-__must_check int media_pipeline_start(struct media_pad *pad,
+__must_check int media_pipeline_start(struct media_pad *origin,
 				      struct media_pipeline *pipe);
 /**
  * __media_pipeline_start - Mark a pipeline as streaming
  *
- * @pad: Starting pad
+ * @origin: Starting pad
  * @pipe: Media pipeline to be assigned to all pads in the pipeline.
  *
  * ..note:: This is the non-locking version of media_pipeline_start()
  */
-__must_check int __media_pipeline_start(struct media_pad *pad,
+__must_check int __media_pipeline_start(struct media_pad *origin,
 					struct media_pipeline *pipe);
 
 /**

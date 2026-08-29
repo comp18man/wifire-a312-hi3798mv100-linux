@@ -26,7 +26,12 @@
  *
  * This function can sleep and thus cannot be called in atomic context.
  *
- * Return: 0 in case of success, a negative error core otherwise.
+ * Return:
+ * * 0 in case of success, a negative error core otherwise.
+ * * -EAGAIN: controller lost address arbitration. Target (IBI, HJ or
+ *   controller role request) win the bus. Client driver needs to resend the
+ *   'xfers' some time later. See I3C spec ver 1.1.1 09-Jun-2021. Section:
+ *   5.1.2.2.3.
  */
 int i3c_device_do_priv_xfers(struct i3c_device *dev,
 			     struct i3c_priv_xfer *xfers,
@@ -42,9 +47,15 @@ int i3c_device_do_priv_xfers(struct i3c_device *dev,
 			return -EINVAL;
 	}
 
+	ret = i3c_bus_rpm_get(dev->bus);
+	if (ret)
+		return ret;
+
 	i3c_bus_normaluse_lock(dev->bus);
 	ret = i3c_dev_do_priv_xfers_locked(dev->desc, xfers, nxfers);
 	i3c_bus_normaluse_unlock(dev->bus);
+
+	i3c_bus_rpm_put(dev->bus);
 
 	return ret;
 }
@@ -62,9 +73,15 @@ int i3c_device_do_setdasa(struct i3c_device *dev)
 {
 	int ret;
 
+	ret = i3c_bus_rpm_get(dev->bus);
+	if (ret)
+		return ret;
+
 	i3c_bus_normaluse_lock(dev->bus);
 	ret = i3c_dev_setdasa_locked(dev->desc);
 	i3c_bus_normaluse_unlock(dev->bus);
+
+	i3c_bus_rpm_put(dev->bus);
 
 	return ret;
 }
@@ -102,15 +119,26 @@ EXPORT_SYMBOL_GPL(i3c_device_get_info);
  */
 int i3c_device_disable_ibi(struct i3c_device *dev)
 {
-	int ret = -ENOENT;
+	int ret;
+
+	if (i3c_bus_rpm_ibi_allowed(dev->bus)) {
+		ret = i3c_bus_rpm_get(dev->bus);
+		if (ret)
+			return ret;
+	}
 
 	i3c_bus_normaluse_lock(dev->bus);
 	if (dev->desc) {
 		mutex_lock(&dev->desc->ibi_lock);
 		ret = i3c_dev_disable_ibi_locked(dev->desc);
 		mutex_unlock(&dev->desc->ibi_lock);
+	} else {
+		ret = -ENOENT;
 	}
 	i3c_bus_normaluse_unlock(dev->bus);
+
+	if (!ret || i3c_bus_rpm_ibi_allowed(dev->bus))
+		i3c_bus_rpm_put(dev->bus);
 
 	return ret;
 }
@@ -131,15 +159,24 @@ EXPORT_SYMBOL_GPL(i3c_device_disable_ibi);
  */
 int i3c_device_enable_ibi(struct i3c_device *dev)
 {
-	int ret = -ENOENT;
+	int ret;
+
+	ret = i3c_bus_rpm_get(dev->bus);
+	if (ret)
+		return ret;
 
 	i3c_bus_normaluse_lock(dev->bus);
 	if (dev->desc) {
 		mutex_lock(&dev->desc->ibi_lock);
 		ret = i3c_dev_enable_ibi_locked(dev->desc);
 		mutex_unlock(&dev->desc->ibi_lock);
+	} else {
+		ret = -ENOENT;
 	}
 	i3c_bus_normaluse_unlock(dev->bus);
+
+	if (ret || i3c_bus_rpm_ibi_allowed(dev->bus))
+		i3c_bus_rpm_put(dev->bus);
 
 	return ret;
 }
@@ -159,18 +196,26 @@ EXPORT_SYMBOL_GPL(i3c_device_enable_ibi);
 int i3c_device_request_ibi(struct i3c_device *dev,
 			   const struct i3c_ibi_setup *req)
 {
-	int ret = -ENOENT;
+	int ret;
 
 	if (!req->handler || !req->num_slots)
 		return -EINVAL;
+
+	ret = i3c_bus_rpm_get(dev->bus);
+	if (ret)
+		return ret;
 
 	i3c_bus_normaluse_lock(dev->bus);
 	if (dev->desc) {
 		mutex_lock(&dev->desc->ibi_lock);
 		ret = i3c_dev_request_ibi_locked(dev->desc, req);
 		mutex_unlock(&dev->desc->ibi_lock);
+	} else {
+		ret = -ENOENT;
 	}
 	i3c_bus_normaluse_unlock(dev->bus);
+
+	i3c_bus_rpm_put(dev->bus);
 
 	return ret;
 }

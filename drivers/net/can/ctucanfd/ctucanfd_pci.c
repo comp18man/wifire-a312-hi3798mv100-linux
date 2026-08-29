@@ -202,14 +202,12 @@ err_free_board:
 	pci_set_drvdata(pdev, NULL);
 	kfree(bdata);
 err_pci_iounmap_bar0:
-	pci_iounmap(pdev, cra_addr);
+	pci_iounmap(pdev, bar0_base);
 err_pci_iounmap_bar1:
 	pci_iounmap(pdev, addr);
 err_release_regions:
-	if (msi_ok) {
+	if (msi_ok)
 		pci_disable_msi(pdev);
-		pci_clear_master(pdev);
-	}
 	pci_release_regions(pdev);
 err_disable_device:
 	pci_disable_device(pdev);
@@ -257,10 +255,8 @@ static void ctucan_pci_remove(struct pci_dev *pdev)
 
 	pci_iounmap(pdev, bdata->bar1_base);
 
-	if (bdata->use_msi) {
+	if (bdata->use_msi)
 		pci_disable_msi(pdev);
-		pci_clear_master(pdev);
-	}
 
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
@@ -278,6 +274,7 @@ static const struct pci_device_id ctucan_pci_tbl[] = {
 		CTUCAN_WITH_CTUCAN_ID)},
 	{},
 };
+MODULE_DEVICE_TABLE(pci, ctucan_pci_tbl);
 
 static struct pci_driver ctucan_pci_driver = {
 	.name = KBUILD_MODNAME,

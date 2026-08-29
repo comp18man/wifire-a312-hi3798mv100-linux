@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2020 Intel Corporation. All rights reserved.
+// Copyright(c) 2020 Intel Corporation
 //
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
@@ -28,7 +28,7 @@
 #define CREATE_TRACE_POINTS
 #include "trace.h"
 
-static int __maybe_unused catpt_suspend(struct device *dev)
+static int catpt_suspend(struct device *dev)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(dev);
 	struct dma_chan *chan;
@@ -72,7 +72,7 @@ release_dma_chan:
 	return catpt_dsp_power_down(cdev);
 }
 
-static int __maybe_unused catpt_resume(struct device *dev)
+static int catpt_resume(struct device *dev)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(dev);
 	int ret, i;
@@ -106,7 +106,7 @@ static int __maybe_unused catpt_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused catpt_runtime_suspend(struct device *dev)
+static int catpt_runtime_suspend(struct device *dev)
 {
 	if (!try_module_get(dev->driver->owner)) {
 		dev_info(dev, "module unloading, skipping suspend\n");
@@ -117,14 +117,14 @@ static int __maybe_unused catpt_runtime_suspend(struct device *dev)
 	return catpt_suspend(dev);
 }
 
-static int __maybe_unused catpt_runtime_resume(struct device *dev)
+static int catpt_runtime_resume(struct device *dev)
 {
 	return catpt_resume(dev);
 }
 
 static const struct dev_pm_ops catpt_dev_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(catpt_suspend, catpt_resume)
-	SET_RUNTIME_PM_OPS(catpt_runtime_suspend, catpt_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(catpt_suspend, catpt_resume)
+	RUNTIME_PM_OPS(catpt_runtime_suspend, catpt_runtime_resume, NULL)
 };
 
 /* machine board owned by CATPT is removed with this hook */
@@ -271,7 +271,15 @@ static int catpt_acpi_probe(struct platform_device *pdev)
 	if (IS_ERR(cdev->pci_ba))
 		return PTR_ERR(cdev->pci_ba);
 
-	/* alloc buffer for storing DRAM context during dx transitions */
+	/*
+	 * As per design HOST is responsible for preserving firmware's runtime
+	 * context during D0 -> D3 -> D0 transitions.  Addresses used for DMA
+	 * to/from HOST memory shall be outside the reserved range of 0xFFFxxxxx.
+	 */
+	ret = dma_coerce_mask_and_coherent(cdev->dev, DMA_BIT_MASK(31));
+	if (ret)
+		return ret;
+
 	cdev->dxbuf_vaddr = dmam_alloc_coherent(dev, catpt_dram_size(cdev),
 						&cdev->dxbuf_paddr, GFP_KERNEL);
 	if (!cdev->dxbuf_vaddr)
@@ -293,7 +301,7 @@ static int catpt_acpi_probe(struct platform_device *pdev)
 	return catpt_probe_components(cdev);
 }
 
-static int catpt_acpi_remove(struct platform_device *pdev)
+static void catpt_acpi_remove(struct platform_device *pdev)
 {
 	struct catpt_dev *cdev = platform_get_drvdata(pdev);
 
@@ -305,8 +313,6 @@ static int catpt_acpi_remove(struct platform_device *pdev)
 
 	catpt_sram_free(&cdev->iram);
 	catpt_sram_free(&cdev->dram);
-
-	return 0;
 }
 
 static struct snd_soc_acpi_mach lpt_machines[] = {
@@ -380,7 +386,7 @@ static struct platform_driver catpt_acpi_driver = {
 	.driver = {
 		.name = "intel_catpt",
 		.acpi_match_table = catpt_ids,
-		.pm = &catpt_dev_pm,
+		.pm = pm_ptr(&catpt_dev_pm),
 		.dev_groups = catpt_attr_groups,
 	},
 };

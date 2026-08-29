@@ -8,7 +8,7 @@
 #include <dt-bindings/clock/histb-clock.h>
 #include <linux/clk-provider.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include "clk.h"
@@ -701,13 +701,12 @@ static int hi3798_crg_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int hi3798_crg_remove(struct platform_device *pdev)
+static void hi3798_crg_remove(struct platform_device *pdev)
 {
 	struct hisi_crg_dev *crg = platform_get_drvdata(pdev);
 
 	hisi_reset_exit(crg->rstc);
 	crg->funcs->unregister_clks(pdev);
-	return 0;
 }
 
 static struct platform_driver hi3798_crg_driver = {

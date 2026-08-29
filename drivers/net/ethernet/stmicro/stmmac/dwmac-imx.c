@@ -12,7 +12,6 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_net.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
@@ -32,16 +31,27 @@
 #define GPR_ENET_QOS_RGMII_EN		(0x1 << 21)
 
 #define MX93_GPR_ENET_QOS_INTF_MODE_MASK	GENMASK(3, 0)
+#define MX93_GPR_ENET_QOS_INTF_MASK		GENMASK(3, 1)
 #define MX93_GPR_ENET_QOS_INTF_SEL_MII		(0x0 << 1)
 #define MX93_GPR_ENET_QOS_INTF_SEL_RMII		(0x4 << 1)
 #define MX93_GPR_ENET_QOS_INTF_SEL_RGMII	(0x1 << 1)
 #define MX93_GPR_ENET_QOS_CLK_GEN_EN		(0x1 << 0)
+#define MX93_GPR_ENET_QOS_CLK_SEL_MASK		BIT_MASK(0)
+#define MX93_GPR_CLK_SEL_OFFSET			(4)
+
+#define DMA_BUS_MODE			0x00001000
+#define DMA_BUS_MODE_SFT_RESET		(0x1 << 0)
+#define RMII_RESET_SPEED		(0x3 << 14)
+#define CTRL_SPEED_MASK			GENMASK(15, 14)
 
 struct imx_dwmac_ops {
 	u32 addr_width;
+	u32 flags;
 	bool mac_rgmii_txclk_auto_adj;
 
+	int (*fix_soc_reset)(struct stmmac_priv *priv, void __iomem *ioaddr);
 	int (*set_intf_mode)(struct plat_stmmacenet_data *plat_dat);
+	void (*fix_mac_speed)(void *priv, int speed, unsigned int mode);
 };
 
 struct imx_priv_data {
@@ -51,6 +61,7 @@ struct imx_priv_data {
 	struct regmap *intf_regmap;
 	u32 intf_reg_off;
 	bool rmii_refclk_ext;
+	void __iomem *base_addr;
 
 	const struct imx_dwmac_ops *ops;
 	struct plat_stmmacenet_data *plat_dat;
@@ -61,7 +72,7 @@ static int imx8mp_set_intf_mode(struct plat_stmmacenet_data *plat_dat)
 	struct imx_priv_data *dwmac = plat_dat->bsp_priv;
 	int val;
 
-	switch (plat_dat->interface) {
+	switch (plat_dat->phy_interface) {
 	case PHY_INTERFACE_MODE_MII:
 		val = GPR_ENET_QOS_INTF_SEL_MII;
 		break;
@@ -77,8 +88,8 @@ static int imx8mp_set_intf_mode(struct plat_stmmacenet_data *plat_dat)
 		      GPR_ENET_QOS_RGMII_EN;
 		break;
 	default:
-		pr_debug("imx dwmac doesn't support %d interface\n",
-			 plat_dat->interface);
+		pr_debug("imx dwmac doesn't support %s interface\n",
+			 phy_modes(plat_dat->phy_interface));
 		return -EINVAL;
 	}
 
@@ -99,13 +110,21 @@ imx8dxl_set_intf_mode(struct plat_stmmacenet_data *plat_dat)
 static int imx93_set_intf_mode(struct plat_stmmacenet_data *plat_dat)
 {
 	struct imx_priv_data *dwmac = plat_dat->bsp_priv;
-	int val;
+	int val, ret;
 
-	switch (plat_dat->interface) {
+	switch (plat_dat->phy_interface) {
 	case PHY_INTERFACE_MODE_MII:
 		val = MX93_GPR_ENET_QOS_INTF_SEL_MII;
 		break;
 	case PHY_INTERFACE_MODE_RMII:
+		if (dwmac->rmii_refclk_ext) {
+			ret = regmap_clear_bits(dwmac->intf_regmap,
+						dwmac->intf_reg_off +
+						MX93_GPR_CLK_SEL_OFFSET,
+						MX93_GPR_ENET_QOS_CLK_SEL_MASK);
+			if (ret)
+				return ret;
+		}
 		val = MX93_GPR_ENET_QOS_INTF_SEL_RMII;
 		break;
 	case PHY_INTERFACE_MODE_RGMII:
@@ -115,8 +134,8 @@ static int imx93_set_intf_mode(struct plat_stmmacenet_data *plat_dat)
 		val = MX93_GPR_ENET_QOS_INTF_SEL_RGMII;
 		break;
 	default:
-		dev_dbg(dwmac->dev, "imx dwmac doesn't support %d interface\n",
-			 plat_dat->interface);
+		dev_dbg(dwmac->dev, "imx dwmac doesn't support %s interface\n",
+			phy_modes(plat_dat->phy_interface));
 		return -EINVAL;
 	}
 
@@ -173,38 +192,96 @@ static void imx_dwmac_exit(struct platform_device *pdev, void *priv)
 	/* nothing to do now */
 }
 
-static void imx_dwmac_fix_speed(void *priv, unsigned int speed)
+static int imx_dwmac_set_clk_tx_rate(void *bsp_priv, struct clk *clk_tx_i,
+				     phy_interface_t interface, int speed)
+{
+	struct imx_priv_data *dwmac = bsp_priv;
+
+	interface = dwmac->plat_dat->phy_interface;
+	if (interface == PHY_INTERFACE_MODE_RMII ||
+	    interface == PHY_INTERFACE_MODE_MII)
+		return 0;
+
+	return stmmac_set_clk_tx_rate(bsp_priv, clk_tx_i, interface, speed);
+}
+
+static void imx_dwmac_fix_speed(void *priv, int speed, unsigned int mode)
 {
 	struct plat_stmmacenet_data *plat_dat;
 	struct imx_priv_data *dwmac = priv;
-	unsigned long rate;
+	long rate;
 	int err;
 
 	plat_dat = dwmac->plat_dat;
 
 	if (dwmac->ops->mac_rgmii_txclk_auto_adj ||
-	    (plat_dat->interface == PHY_INTERFACE_MODE_RMII) ||
-	    (plat_dat->interface == PHY_INTERFACE_MODE_MII))
+	    (plat_dat->phy_interface == PHY_INTERFACE_MODE_RMII) ||
+	    (plat_dat->phy_interface == PHY_INTERFACE_MODE_MII))
 		return;
 
-	switch (speed) {
-	case SPEED_1000:
-		rate = 125000000;
-		break;
-	case SPEED_100:
-		rate = 25000000;
-		break;
-	case SPEED_10:
-		rate = 2500000;
-		break;
-	default:
-		dev_err(dwmac->dev, "invalid speed %u\n", speed);
+	rate = rgmii_clock(speed);
+	if (rate < 0) {
+		dev_err(dwmac->dev, "invalid speed %d\n", speed);
 		return;
 	}
 
 	err = clk_set_rate(dwmac->clk_tx, rate);
 	if (err < 0)
 		dev_err(dwmac->dev, "failed to set tx rate %lu\n", rate);
+}
+
+static void imx93_dwmac_fix_speed(void *priv, int speed, unsigned int mode)
+{
+	struct imx_priv_data *dwmac = priv;
+	unsigned int iface;
+	int ctrl, old_ctrl;
+
+	imx_dwmac_fix_speed(priv, speed, mode);
+
+	if (!dwmac || mode != MLO_AN_FIXED)
+		return;
+
+	if (regmap_read(dwmac->intf_regmap, dwmac->intf_reg_off, &iface))
+		return;
+
+	iface &= MX93_GPR_ENET_QOS_INTF_MASK;
+	if (iface != MX93_GPR_ENET_QOS_INTF_SEL_RGMII)
+		return;
+
+	old_ctrl = readl(dwmac->base_addr + MAC_CTRL_REG);
+	ctrl = old_ctrl & ~CTRL_SPEED_MASK;
+	regmap_update_bits(dwmac->intf_regmap, dwmac->intf_reg_off,
+			   MX93_GPR_ENET_QOS_INTF_MODE_MASK, 0);
+	writel(ctrl, dwmac->base_addr + MAC_CTRL_REG);
+
+	 /* Ensure the settings for CTRL are applied. */
+	readl(dwmac->base_addr + MAC_CTRL_REG);
+
+	usleep_range(10, 20);
+	iface |= MX93_GPR_ENET_QOS_CLK_GEN_EN;
+	regmap_update_bits(dwmac->intf_regmap, dwmac->intf_reg_off,
+			   MX93_GPR_ENET_QOS_INTF_MODE_MASK, iface);
+
+	writel(old_ctrl, dwmac->base_addr + MAC_CTRL_REG);
+}
+
+static int imx_dwmac_mx93_reset(struct stmmac_priv *priv, void __iomem *ioaddr)
+{
+	struct plat_stmmacenet_data *plat_dat = priv->plat;
+	u32 value = readl(ioaddr + DMA_BUS_MODE);
+
+	/* DMA SW reset */
+	value |= DMA_BUS_MODE_SFT_RESET;
+	writel(value, ioaddr + DMA_BUS_MODE);
+
+	if (plat_dat->phy_interface == PHY_INTERFACE_MODE_RMII) {
+		usleep_range(100, 200);
+		writel(RMII_RESET_SPEED, ioaddr + MAC_CTRL_REG);
+	}
+
+	return readl_poll_timeout(ioaddr + DMA_BUS_MODE, value,
+				 !(value & DMA_BUS_MODE_SFT_RESET),
+				 10000, 1000000);
 }
 
 static int
@@ -224,6 +301,7 @@ imx_dwmac_parse_dt(struct imx_priv_data *dwmac, struct device *dev)
 	dwmac->clk_mem = NULL;
 
 	if (of_machine_is_compatible("fsl,imx8dxl") ||
+	    of_machine_is_compatible("fsl,imx91") ||
 	    of_machine_is_compatible("fsl,imx93")) {
 		dwmac->clk_mem = devm_clk_get(dev, "mem");
 		if (IS_ERR(dwmac->clk_mem)) {
@@ -233,20 +311,17 @@ imx_dwmac_parse_dt(struct imx_priv_data *dwmac, struct device *dev)
 	}
 
 	if (of_machine_is_compatible("fsl,imx8mp") ||
+	    of_machine_is_compatible("fsl,imx91") ||
 	    of_machine_is_compatible("fsl,imx93")) {
 		/* Binding doc describes the propety:
-		 * is required by i.MX8MP, i.MX93.
+		 * is required by i.MX8MP, i.MX91, i.MX93.
 		 * is optinoal for i.MX8DXL.
 		 */
-		dwmac->intf_regmap = syscon_regmap_lookup_by_phandle(np, "intf_mode");
+		dwmac->intf_regmap =
+			syscon_regmap_lookup_by_phandle_args(np, "intf_mode", 1,
+							     &dwmac->intf_reg_off);
 		if (IS_ERR(dwmac->intf_regmap))
 			return PTR_ERR(dwmac->intf_regmap);
-
-		err = of_property_read_u32_index(np, "intf_mode", 1, &dwmac->intf_reg_off);
-		if (err) {
-			dev_err(dev, "Can't get intf mode reg offset (%d)\n", err);
-			return err;
-		}
 	}
 
 	return err;
@@ -268,15 +343,14 @@ static int imx_dwmac_probe(struct platform_device *pdev)
 	if (!dwmac)
 		return -ENOMEM;
 
-	plat_dat = stmmac_probe_config_dt(pdev, stmmac_res.mac);
+	plat_dat = devm_stmmac_probe_config_dt(pdev, stmmac_res.mac);
 	if (IS_ERR(plat_dat))
 		return PTR_ERR(plat_dat);
 
 	data = of_device_get_match_data(&pdev->dev);
 	if (!data) {
 		dev_err(&pdev->dev, "failed to get match data\n");
-		ret = -EINVAL;
-		goto err_match_data;
+		return -EINVAL;
 	}
 
 	dwmac->ops = data;
@@ -285,39 +359,41 @@ static int imx_dwmac_probe(struct platform_device *pdev)
 	ret = imx_dwmac_parse_dt(dwmac, &pdev->dev);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to parse OF data\n");
-		goto err_parse_dt;
+		return ret;
 	}
+
+	if (data->flags & STMMAC_FLAG_HWTSTAMP_CORRECT_LATENCY)
+		plat_dat->flags |= STMMAC_FLAG_HWTSTAMP_CORRECT_LATENCY;
+
+	/* Default TX Q0 to use TSO and rest TXQ for TBS */
+	for (int i = 1; i < plat_dat->tx_queues_to_use; i++)
+		plat_dat->tx_queues_cfg[i].tbs_en = 1;
 
 	plat_dat->host_dma_width = dwmac->ops->addr_width;
 	plat_dat->init = imx_dwmac_init;
 	plat_dat->exit = imx_dwmac_exit;
 	plat_dat->clks_config = imx_dwmac_clks_config;
-	plat_dat->fix_mac_speed = imx_dwmac_fix_speed;
 	plat_dat->bsp_priv = dwmac;
 	dwmac->plat_dat = plat_dat;
+	dwmac->base_addr = stmmac_res.addr;
 
 	ret = imx_dwmac_clks_config(dwmac, true);
 	if (ret)
-		goto err_clks_config;
+		return ret;
 
-	ret = imx_dwmac_init(pdev, dwmac);
+	if (dwmac->ops->fix_mac_speed) {
+		plat_dat->fix_mac_speed = dwmac->ops->fix_mac_speed;
+	} else if (!dwmac->ops->mac_rgmii_txclk_auto_adj) {
+		plat_dat->clk_tx_i = dwmac->clk_tx;
+		plat_dat->set_clk_tx_rate = imx_dwmac_set_clk_tx_rate;
+	}
+
+	dwmac->plat_dat->fix_soc_reset = dwmac->ops->fix_soc_reset;
+
+	ret = stmmac_pltfr_probe(pdev, plat_dat, &stmmac_res);
 	if (ret)
-		goto err_dwmac_init;
+		imx_dwmac_clks_config(dwmac, false);
 
-	ret = stmmac_dvr_probe(&pdev->dev, plat_dat, &stmmac_res);
-	if (ret)
-		goto err_drv_probe;
-
-	return 0;
-
-err_drv_probe:
-	imx_dwmac_exit(pdev, plat_dat->bsp_priv);
-err_dwmac_init:
-	imx_dwmac_clks_config(dwmac, false);
-err_clks_config:
-err_parse_dt:
-err_match_data:
-	stmmac_remove_config_dt(pdev, plat_dat);
 	return ret;
 }
 
@@ -325,6 +401,7 @@ static struct imx_dwmac_ops imx8mp_dwmac_data = {
 	.addr_width = 34,
 	.mac_rgmii_txclk_auto_adj = false,
 	.set_intf_mode = imx8mp_set_intf_mode,
+	.flags = STMMAC_FLAG_HWTSTAMP_CORRECT_LATENCY,
 };
 
 static struct imx_dwmac_ops imx8dxl_dwmac_data = {
@@ -337,6 +414,8 @@ static struct imx_dwmac_ops imx93_dwmac_data = {
 	.addr_width = 32,
 	.mac_rgmii_txclk_auto_adj = true,
 	.set_intf_mode = imx93_set_intf_mode,
+	.fix_soc_reset = imx_dwmac_mx93_reset,
+	.fix_mac_speed = imx93_dwmac_fix_speed,
 };
 
 static const struct of_device_id imx_dwmac_match[] = {

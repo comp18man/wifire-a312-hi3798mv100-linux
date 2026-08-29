@@ -31,7 +31,7 @@ struct qcom_rmtfs_mem {
 
 	unsigned int client_id;
 
-	unsigned int perms;
+	u64 perms;
 };
 
 static ssize_t qcom_rmtfs_mem_show(struct device *dev,
@@ -125,8 +125,7 @@ static int qcom_rmtfs_mem_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static struct class rmtfs_class = {
-	.owner          = THIS_MODULE,
+static const struct class rmtfs_class = {
 	.name           = "rmtfs",
 };
 
@@ -201,6 +200,15 @@ static int qcom_rmtfs_mem_probe(struct platform_device *pdev)
 	rmtfs_mem->client_id = client_id;
 	rmtfs_mem->size = rmem->size;
 
+	/*
+	 * If requested, discard the first and last 4k block in order to ensure
+	 * that the rmtfs region isn't adjacent to other protected regions.
+	 */
+	if (of_property_read_bool(node, "qcom,use-guard-pages")) {
+		rmtfs_mem->addr += SZ_4K;
+		rmtfs_mem->size -= 2 * SZ_4K;
+	}
+
 	device_initialize(&rmtfs_mem->dev);
 	rmtfs_mem->dev.parent = &pdev->dev;
 	rmtfs_mem->dev.groups = qcom_rmtfs_mem_groups;
@@ -234,6 +242,7 @@ static int qcom_rmtfs_mem_probe(struct platform_device *pdev)
 		num_vmids = 0;
 	} else if (num_vmids < 0) {
 		dev_err(&pdev->dev, "failed to count qcom,vmid elements: %d\n", num_vmids);
+		ret = num_vmids;
 		goto remove_cdev;
 	} else if (num_vmids > NUM_MAX_VMIDS) {
 		dev_warn(&pdev->dev,
@@ -281,7 +290,7 @@ put_device:
 	return ret;
 }
 
-static int qcom_rmtfs_mem_remove(struct platform_device *pdev)
+static void qcom_rmtfs_mem_remove(struct platform_device *pdev)
 {
 	struct qcom_rmtfs_mem *rmtfs_mem = dev_get_drvdata(&pdev->dev);
 	struct qcom_scm_vmperm perm;
@@ -296,8 +305,6 @@ static int qcom_rmtfs_mem_remove(struct platform_device *pdev)
 
 	cdev_device_del(&rmtfs_mem->cdev, &rmtfs_mem->dev);
 	put_device(&rmtfs_mem->dev);
-
-	return 0;
 }
 
 static const struct of_device_id qcom_rmtfs_mem_of_match[] = {

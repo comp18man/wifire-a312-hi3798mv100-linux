@@ -10,7 +10,7 @@
 #include <linux/module.h>
 #include <linux/mmc/host.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include "sdhci-pltfm.h"
 
 struct sdhci_iproc_data {
@@ -379,23 +379,16 @@ static int sdhci_iproc_probe(struct platform_device *pdev)
 
 	ret = mmc_of_parse(host->mmc);
 	if (ret)
-		goto err;
+		return ret;
 
 	sdhci_get_property(pdev);
 
 	host->mmc->caps |= iproc_host->data->mmc_caps;
 
 	if (dev->of_node) {
-		pltfm_host->clk = devm_clk_get(dev, NULL);
-		if (IS_ERR(pltfm_host->clk)) {
-			ret = PTR_ERR(pltfm_host->clk);
-			goto err;
-		}
-		ret = clk_prepare_enable(pltfm_host->clk);
-		if (ret) {
-			dev_err(dev, "failed to enable host clk\n");
-			goto err;
-		}
+		pltfm_host->clk = devm_clk_get_enabled(dev, NULL);
+		if (IS_ERR(pltfm_host->clk))
+			return PTR_ERR(pltfm_host->clk);
 	}
 
 	if (iproc_host->data->missing_caps) {
@@ -404,18 +397,7 @@ static int sdhci_iproc_probe(struct platform_device *pdev)
 				  &iproc_host->data->caps1);
 	}
 
-	ret = sdhci_add_host(host);
-	if (ret)
-		goto err_clk;
-
-	return 0;
-
-err_clk:
-	if (dev->of_node)
-		clk_disable_unprepare(pltfm_host->clk);
-err:
-	sdhci_pltfm_free(pdev);
-	return ret;
+	return sdhci_add_host(host);
 }
 
 static void sdhci_iproc_shutdown(struct platform_device *pdev)
@@ -432,7 +414,7 @@ static struct platform_driver sdhci_iproc_driver = {
 		.pm = &sdhci_pltfm_pmops,
 	},
 	.probe = sdhci_iproc_probe,
-	.remove = sdhci_pltfm_unregister,
+	.remove = sdhci_pltfm_remove,
 	.shutdown = sdhci_iproc_shutdown,
 };
 module_platform_driver(sdhci_iproc_driver);

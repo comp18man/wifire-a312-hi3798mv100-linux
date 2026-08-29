@@ -29,7 +29,7 @@ static int tpmrm_open(struct inode *inode, struct file *file)
 
 	tpm_common_open(file, chip, &priv->priv, &priv->space);
 
-	return 0;
+	return nonseekable_open(inode, file);
 }
 
 static int tpmrm_release(struct inode *inode, struct file *file)
@@ -46,7 +46,6 @@ static int tpmrm_release(struct inode *inode, struct file *file)
 
 const struct file_operations tpmrm_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.open = tpmrm_open,
 	.read = tpm_common_read,
 	.write = tpm_common_write,

@@ -11,7 +11,6 @@
 #include <linux/pm.h>
 #include <linux/platform_device.h>
 #include <linux/i2c.h>
-#include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/leds.h>
 #include <linux/slab.h>
@@ -803,8 +802,8 @@ static struct i2c_driver adp8860_driver = {
 		.name	= KBUILD_MODNAME,
 		.pm	= &adp8860_i2c_pm_ops,
 	},
-	.probe_new = adp8860_probe,
-	.remove   = adp8860_remove,
+	.probe = adp8860_probe,
+	.remove = adp8860_remove,
 	.id_table = adp8860_id,
 };
 

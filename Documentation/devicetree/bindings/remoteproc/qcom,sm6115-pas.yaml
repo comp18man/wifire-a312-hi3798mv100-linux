@@ -7,7 +7,8 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Qualcomm SM6115 Peripheral Authentication Service
 
 maintainers:
-  - Bhupesh Sharma <bhupesh.sharma@linaro.org>
+  - Bjorn Andersson <andersson@kernel.org>
+  - Konrad Dybcio <konradybcio@kernel.org>
 
 description:
   Qualcomm SM6115 SoC Peripheral Authentication Service loads and boots
@@ -15,10 +16,19 @@ description:
 
 properties:
   compatible:
-    enum:
-      - qcom,sm6115-adsp-pas
-      - qcom,sm6115-cdsp-pas
-      - qcom,sm6115-mpss-pas
+    oneOf:
+      - enum:
+          - qcom,sm6115-adsp-pas
+          - qcom,sm6115-cdsp-pas
+          - qcom,sm6115-mpss-pas
+
+      - items:
+          - const: qcom,qcm2290-adsp-pas
+          - const: qcom,sm6115-adsp-pas
+
+      - items:
+          - const: qcom,qcm2290-mpss-pas
+          - const: qcom,sm6115-mpss-pas
 
   reg:
     maxItems: 1
@@ -32,27 +42,29 @@ properties:
       - const: xo
 
   memory-region:
-    minItems: 1
+    maxItems: 1
     description: Reference to the reserved-memory for the Hexagon core
 
   smd-edge: false
 
   firmware-name:
-    $ref: /schemas/types.yaml#/definitions/string
+    maxItems: 1
     description: Firmware name for the Hexagon core
 
 required:
   - compatible
   - reg
+  - memory-region
 
 allOf:
   - $ref: /schemas/remoteproc/qcom,pas-common.yaml#
   - if:
       properties:
         compatible:
-          enum:
-            - qcom,sm6115-adsp-pas
-            - qcom,sm6115-cdsp-pas
+          contains:
+            enum:
+              - qcom,sm6115-adsp-pas
+              - qcom,sm6115-cdsp-pas
     then:
       properties:
         interrupts:
@@ -69,9 +81,10 @@ allOf:
   - if:
       properties:
         compatible:
-          enum:
-            - qcom,sm6115-cdsp-pas
-            - qcom,sm6115-mpss-pas
+          contains:
+            enum:
+              - qcom,sm6115-cdsp-pas
+              - qcom,sm6115-mpss-pas
     then:
       properties:
         power-domains:
@@ -84,8 +97,9 @@ allOf:
   - if:
       properties:
         compatible:
-          enum:
-            - qcom,sm6115-adsp-pas
+          contains:
+            enum:
+              - qcom,sm6115-adsp-pas
     then:
       properties:
         power-domains:
@@ -113,7 +127,7 @@ examples:
         clocks = <&rpmcc RPM_SMD_XO_CLK_SRC>;
         clock-names = "xo";
 
-        firmware-name = "qcom/sm6115/adsp.mdt";
+        firmware-name = "qcom/sm6115/adsp.mbn";
 
         interrupts-extended = <&intc GIC_SPI 282 IRQ_TYPE_EDGE_RISING>,
                               <&adsp_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,

@@ -20,7 +20,7 @@
 #include <linux/types.h>
 #include <linux/watchdog.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define ZIIRAVE_TIMEOUT_MIN	3
 #define ZIIRAVE_TIMEOUT_MAX	255
@@ -301,6 +301,9 @@ static int ziirave_firm_verify(struct watchdog_device *wdd,
 	for (rec = (void *)fw->data; rec; rec = ihex_next_binrec(rec)) {
 		const u16 len = be16_to_cpu(rec->len);
 		const u32 addr = be32_to_cpu(rec->addr);
+
+		if (len > sizeof(data))
+			return -EINVAL;
 
 		if (ziirave_firm_addr_readonly(addr))
 			continue;
@@ -715,7 +718,7 @@ static void ziirave_wdt_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ziirave_wdt_id[] = {
-	{ "rave-wdt", 0 },
+	{ "rave-wdt" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ziirave_wdt_id);
@@ -731,7 +734,7 @@ static struct i2c_driver ziirave_wdt_driver = {
 		.name = "ziirave_wdt",
 		.of_match_table = zrv_wdt_of_match,
 	},
-	.probe_new = ziirave_wdt_probe,
+	.probe = ziirave_wdt_probe,
 	.remove = ziirave_wdt_remove,
 	.id_table = ziirave_wdt_id,
 };

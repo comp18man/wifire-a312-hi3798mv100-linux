@@ -5,7 +5,8 @@
 // Common Clock Framework support for Exynos5 power-domain dependent clocks
 
 #include <linux/io.h>
-#include <linux/of_platform.h>
+#include <linux/mod_devicetable.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>

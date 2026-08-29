@@ -15,7 +15,7 @@
 *******************************************************************************/
 
 #include <linux/crc32.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include "stmmac.h"
 #include "dwmac100.h"
 
@@ -132,7 +132,7 @@ static void dwmac100_flow_ctrl(struct mac_device_info *hw, unsigned int duplex,
 	unsigned int flow = MAC_FLOW_CTRL_ENABLE;
 
 	if (duplex)
-		flow |= (pause_time << MAC_FLOW_CTRL_PT_SHIFT);
+		flow |= FIELD_PREP(MAC_FLOW_CTRL_PT_MASK, pause_time);
 	writel(flow, ioaddr + MAC_FLOW_CTRL);
 }
 
@@ -175,6 +175,8 @@ int dwmac100_setup(struct stmmac_priv *priv)
 	dev_info(priv->device, "\tDWMAC100\n");
 
 	mac->pcsr = priv->ioaddr;
+	mac->link.caps = MAC_ASYM_PAUSE | MAC_SYM_PAUSE |
+			 MAC_10 | MAC_100;
 	mac->link.duplex = MAC_CONTROL_F;
 	mac->link.speed10 = 0;
 	mac->link.speed100 = 0;

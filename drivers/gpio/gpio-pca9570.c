@@ -30,7 +30,7 @@ struct pca9570_chip_data {
 /**
  * struct pca9570 - GPIO driver data
  * @chip: GPIO controller chip
- * @p_data: GPIO controller platform data
+ * @chip_data: GPIO controller platform data
  * @lock: Protects write sequences
  * @out: Buffer for device register
  */
@@ -88,7 +88,7 @@ static int pca9570_get(struct gpio_chip *chip, unsigned offset)
 	return !!(buffer & BIT(offset));
 }
 
-static void pca9570_set(struct gpio_chip *chip, unsigned offset, int value)
+static int pca9570_set(struct gpio_chip *chip, unsigned int offset, int value)
 {
 	struct pca9570 *gpio = gpiochip_get_data(chip);
 	u8 buffer;
@@ -110,6 +110,7 @@ static void pca9570_set(struct gpio_chip *chip, unsigned offset, int value)
 
 out:
 	mutex_unlock(&gpio->lock);
+	return ret;
 }
 
 static int pca9570_probe(struct i2c_client *client)
@@ -175,7 +176,7 @@ static struct i2c_driver pca9570_driver = {
 		.name = "pca9570",
 		.of_match_table = pca9570_of_match_table,
 	},
-	.probe_new = pca9570_probe,
+	.probe = pca9570_probe,
 	.id_table = pca9570_id_table,
 };
 module_i2c_driver(pca9570_driver);

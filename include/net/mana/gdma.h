@@ -10,6 +10,7 @@
 #include "shm_channel.h"
 
 #define GDMA_STATUS_MORE_ENTRIES	0x00000105
+#define GDMA_STATUS_CMD_UNSUPPORTED	0xffffffff
 
 /* Structures labeled with "HW DATA" are exchanged with the hardware. All of
  * them are naturally aligned and hence don't need __packed.
@@ -33,6 +34,7 @@ enum gdma_request_type {
 	GDMA_DESTROY_PD			= 30,
 	GDMA_CREATE_MR			= 31,
 	GDMA_DESTROY_MR			= 32,
+	GDMA_QUERY_HWC_TIMEOUT		= 84, /* 0x54 */
 };
 
 #define GDMA_RESOURCE_DOORBELL_PAGE	27
@@ -57,12 +59,30 @@ enum gdma_eqe_type {
 	GDMA_EQE_HWC_INIT_EQ_ID_DB	= 129,
 	GDMA_EQE_HWC_INIT_DATA		= 130,
 	GDMA_EQE_HWC_INIT_DONE		= 131,
+	GDMA_EQE_HWC_FPGA_RECONFIG	= 132,
+	GDMA_EQE_HWC_SOC_RECONFIG_DATA	= 133,
+	GDMA_EQE_HWC_SOC_SERVICE	= 134,
+	GDMA_EQE_HWC_RESET_REQUEST	= 135,
+	GDMA_EQE_RNIC_QP_FATAL		= 176,
 };
 
 enum {
 	GDMA_DEVICE_NONE	= 0,
 	GDMA_DEVICE_HWC		= 1,
 	GDMA_DEVICE_MANA	= 2,
+	GDMA_DEVICE_MANA_IB	= 3,
+};
+
+enum gdma_service_type {
+	GDMA_SERVICE_TYPE_NONE		= 0,
+	GDMA_SERVICE_TYPE_RDMA_SUSPEND	= 1,
+	GDMA_SERVICE_TYPE_RDMA_RESUME	= 2,
+};
+
+struct mana_service_work {
+	struct work_struct work;
+	struct gdma_dev *gdma_dev;
+	enum gdma_service_type event;
 };
 
 struct gdma_resource {
@@ -145,6 +165,9 @@ struct gdma_general_req {
 }; /* HW DATA */
 
 #define GDMA_MESSAGE_V1 1
+#define GDMA_MESSAGE_V2 2
+#define GDMA_MESSAGE_V3 3
+#define GDMA_MESSAGE_V4 4
 
 struct gdma_general_resp {
 	struct gdma_resp_hdr hdr;
@@ -216,9 +239,19 @@ struct gdma_dev {
 	void *driver_data;
 
 	struct auxiliary_device *adev;
+	bool is_suspended;
+	bool rdma_teardown;
 };
 
-#define MINIMUM_SUPPORTED_PAGE_SIZE PAGE_SIZE
+/* MANA_PAGE_SIZE is the DMA unit */
+#define MANA_PAGE_SHIFT 12
+#define MANA_PAGE_SIZE BIT(MANA_PAGE_SHIFT)
+#define MANA_PAGE_ALIGN(x) ALIGN((x), MANA_PAGE_SIZE)
+#define MANA_PAGE_ALIGNED(addr) IS_ALIGNED((unsigned long)(addr), MANA_PAGE_SIZE)
+#define MANA_PFN(a) ((a) >> MANA_PAGE_SHIFT)
+
+/* Required by HW */
+#define MANA_MIN_QSIZE MANA_PAGE_SIZE
 
 #define GDMA_CQE_SIZE 64
 #define GDMA_EQE_SIZE 16
@@ -252,7 +285,8 @@ struct gdma_event {
 struct gdma_queue;
 
 struct mana_eq {
-	struct gdma_queue *eq;
+	struct gdma_queue	*eq;
+	struct dentry		*mana_eq_debugfs;
 };
 
 typedef void gdma_eq_callback(void *context, struct gdma_queue *q,
@@ -289,6 +323,7 @@ struct gdma_queue {
 
 	u32 head;
 	u32 tail;
+	struct list_head entry;
 
 	/* Extra fields specific to EQ/CQ. */
 	union {
@@ -324,6 +359,7 @@ struct gdma_queue_spec {
 			void *context;
 
 			unsigned long log2_throttle_limit;
+			unsigned int msix_index;
 		} eq;
 
 		struct {
@@ -340,19 +376,28 @@ struct gdma_queue_spec {
 
 struct gdma_irq_context {
 	void (*handler)(void *arg);
-	void *arg;
+	/* Protect the eq_list */
+	spinlock_t lock;
+	struct list_head eq_list;
 	char name[MANA_IRQ_NAME_SZ];
+};
+
+enum gdma_context_flags {
+	GC_PROBE_SUCCEEDED	= 0,
 };
 
 struct gdma_context {
 	struct device		*dev;
+	struct dentry		*mana_pci_debugfs;
 
 	/* Per-vPort max number of queues */
 	unsigned int		max_num_queues;
 	unsigned int		max_num_msix;
 	unsigned int		num_msix_usable;
-	struct gdma_resource	msix_resource;
-	struct gdma_irq_context	*irq_contexts;
+	struct xarray		irq_contexts;
+
+	/* L2 MTU */
+	u16 adapter_mtu;
 
 	/* This maps a CQ index to the queue structure. */
 	unsigned int		max_num_cqs;
@@ -364,6 +409,8 @@ struct gdma_context {
 	u32			test_event_eq_id;
 
 	bool			is_pf;
+	bool			in_service;
+
 	phys_addr_t		bar0_pa;
 	void __iomem		*bar0_va;
 	void __iomem		*shm_base;
@@ -380,9 +427,16 @@ struct gdma_context {
 
 	/* Azure network adapter */
 	struct gdma_dev		mana;
-};
 
-#define MAX_NUM_GDMA_DEVICES	4
+	/* Azure RDMA adapter */
+	struct gdma_dev		mana_ib;
+
+	u64 pf_cap_flags1;
+
+	struct workqueue_struct *service_wq;
+
+	unsigned long		flags;
+};
 
 static inline bool mana_gd_is_mana(struct gdma_dev *gd)
 {
@@ -437,6 +491,8 @@ struct gdma_wqe {
 
 #define INLINE_OOB_SMALL_SIZE 8
 #define INLINE_OOB_LARGE_SIZE 24
+
+#define MANA_MAX_TX_WQE_SGL_ENTRIES 30
 
 #define MAX_TX_WQE_SIZE 512
 #define MAX_RX_WQE_SIZE 256
@@ -527,10 +583,50 @@ enum {
  * so the driver is able to reliably support features like busy_poll.
  */
 #define GDMA_DRV_CAP_FLAG_1_NAPI_WKDONE_FIX BIT(2)
+#define GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECONFIG BIT(3)
+#define GDMA_DRV_CAP_FLAG_1_GDMA_PAGES_4MB_1GB_2GB BIT(4)
+#define GDMA_DRV_CAP_FLAG_1_VARIABLE_INDIRECTION_TABLE_SUPPORT BIT(5)
+
+/* Driver can handle holes (zeros) in the device list */
+#define GDMA_DRV_CAP_FLAG_1_DEV_LIST_HOLES_SUP BIT(11)
+
+/* Driver supports dynamic MSI-X vector allocation */
+#define GDMA_DRV_CAP_FLAG_1_DYNAMIC_IRQ_ALLOC_SUPPORT BIT(13)
+
+/* Driver can self reset on EQE notification */
+#define GDMA_DRV_CAP_FLAG_1_SELF_RESET_ON_EQE BIT(14)
+
+/* Driver can self reset on FPGA Reconfig EQE notification */
+#define GDMA_DRV_CAP_FLAG_1_HANDLE_RECONFIG_EQE BIT(17)
+
+/* Driver detects stalled send queues and recovers them */
+#define GDMA_DRV_CAP_FLAG_1_HANDLE_STALL_SQ_RECOVERY BIT(18)
+
+#define GDMA_DRV_CAP_FLAG_1_HW_VPORT_LINK_AWARE BIT(6)
+
+/* Driver supports linearizing the skb when num_sge exceeds hardware limit */
+#define GDMA_DRV_CAP_FLAG_1_SKB_LINEARIZE BIT(20)
+
+/* Driver can send HWC periodically to query stats */
+#define GDMA_DRV_CAP_FLAG_1_PERIODIC_STATS_QUERY BIT(21)
+
+/* Driver can handle hardware recovery events during probe */
+#define GDMA_DRV_CAP_FLAG_1_PROBE_RECOVERY BIT(22)
 
 #define GDMA_DRV_CAP_FLAGS1 \
 	(GDMA_DRV_CAP_FLAG_1_EQ_SHARING_MULTI_VPORT | \
-	 GDMA_DRV_CAP_FLAG_1_NAPI_WKDONE_FIX)
+	 GDMA_DRV_CAP_FLAG_1_NAPI_WKDONE_FIX | \
+	 GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECONFIG | \
+	 GDMA_DRV_CAP_FLAG_1_VARIABLE_INDIRECTION_TABLE_SUPPORT | \
+	 GDMA_DRV_CAP_FLAG_1_DEV_LIST_HOLES_SUP | \
+	 GDMA_DRV_CAP_FLAG_1_DYNAMIC_IRQ_ALLOC_SUPPORT | \
+	 GDMA_DRV_CAP_FLAG_1_SELF_RESET_ON_EQE | \
+	 GDMA_DRV_CAP_FLAG_1_HANDLE_RECONFIG_EQE | \
+	 GDMA_DRV_CAP_FLAG_1_HW_VPORT_LINK_AWARE | \
+	 GDMA_DRV_CAP_FLAG_1_PERIODIC_STATS_QUERY | \
+	 GDMA_DRV_CAP_FLAG_1_SKB_LINEARIZE | \
+	 GDMA_DRV_CAP_FLAG_1_PROBE_RECOVERY | \
+	 GDMA_DRV_CAP_FLAG_1_HANDLE_STALL_SQ_RECOVERY)
 
 #define GDMA_DRV_CAP_FLAGS2 0
 
@@ -591,11 +687,12 @@ struct gdma_query_max_resources_resp {
 }; /* HW DATA */
 
 /* GDMA_LIST_DEVICES */
+#define GDMA_DEV_LIST_SIZE 64
 struct gdma_list_devices_resp {
 	struct gdma_resp_hdr hdr;
 	u32 num_of_devs;
 	u32 reserved;
-	struct gdma_dev_id devs[64];
+	struct gdma_dev_id devs[GDMA_DEV_LIST_SIZE];
 }; /* HW DATA */
 
 /* GDMA_REGISTER_DEVICE */
@@ -660,18 +757,17 @@ struct gdma_disable_queue_req {
 	u32 alloc_res_id_on_creation;
 }; /* HW DATA */
 
-enum atb_page_size {
-	ATB_PAGE_SIZE_4K,
-	ATB_PAGE_SIZE_8K,
-	ATB_PAGE_SIZE_16K,
-	ATB_PAGE_SIZE_32K,
-	ATB_PAGE_SIZE_64K,
-	ATB_PAGE_SIZE_128K,
-	ATB_PAGE_SIZE_256K,
-	ATB_PAGE_SIZE_512K,
-	ATB_PAGE_SIZE_1M,
-	ATB_PAGE_SIZE_2M,
-	ATB_PAGE_SIZE_MAX,
+/* GDMA_QUERY_HWC_TIMEOUT */
+struct gdma_query_hwc_timeout_req {
+	struct gdma_req_hdr hdr;
+	u32 timeout_ms;
+	u32 reserved;
+};
+
+struct gdma_query_hwc_timeout_resp {
+	struct gdma_resp_hdr hdr;
+	u32 timeout_ms;
+	u32 reserved;
 };
 
 enum gdma_mr_access_flags {
@@ -732,6 +828,7 @@ struct gdma_destroy_dma_region_req {
 
 enum gdma_pd_flags {
 	GDMA_PD_FLAG_INVALID = 0,
+	GDMA_PD_FLAG_ALLOW_GPA_MR = 1,
 };
 
 struct gdma_create_pd_req {
@@ -757,11 +854,18 @@ struct gdma_destory_pd_resp {
 };/* HW DATA */
 
 enum gdma_mr_type {
+	/*
+	 * Guest Physical Address - MRs of this type allow access
+	 * to any DMA-mapped memory using bus-logical address
+	 */
+	GDMA_MR_TYPE_GPA = 1,
 	/* Guest Virtual Address - MRs of this type allow access
 	 * to memory mapped by PTEs associated with this MR using a virtual
 	 * address that is set up in the MST
 	 */
 	GDMA_MR_TYPE_GVA = 2,
+	/* Guest zero-based address MRs */
+	GDMA_MR_TYPE_ZBVA = 4,
 };
 
 struct gdma_create_mr_params {
@@ -773,6 +877,10 @@ struct gdma_create_mr_params {
 			u64 virtual_address;
 			enum gdma_mr_access_flags access_flags;
 		} gva;
+		struct {
+			u64 dma_region_handle;
+			enum gdma_mr_access_flags access_flags;
+		} zbva;
 	};
 };
 
@@ -788,7 +896,10 @@ struct gdma_create_mr_request {
 			u64 virtual_address;
 			enum gdma_mr_access_flags access_flags;
 		} gva;
-
+		struct {
+			u64 dma_region_handle;
+			enum gdma_mr_access_flags access_flags;
+		} zbva;
 	};
 	u32 reserved_2;
 };/* HW DATA */
@@ -837,5 +948,14 @@ int mana_gd_send_request(struct gdma_context *gc, u32 req_len, const void *req,
 			 u32 resp_len, void *resp);
 
 int mana_gd_destroy_dma_region(struct gdma_context *gc, u64 dma_region_handle);
+void mana_register_debugfs(void);
+void mana_unregister_debugfs(void);
+
+int mana_rdma_service_event(struct gdma_context *gc, enum gdma_service_type event);
+
+int mana_gd_suspend(struct pci_dev *pdev, pm_message_t state);
+int mana_gd_resume(struct pci_dev *pdev);
+
+bool mana_need_log(struct gdma_context *gc, int err);
 
 #endif /* _GDMA_H */

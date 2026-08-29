@@ -224,7 +224,7 @@ static int userspace_ctr(struct dm_dirty_log *log, struct dm_target *ti,
 
 	lc->usr_argc = argc;
 
-	strncpy(lc->uuid, argv[0], DM_UUID_LEN);
+	strscpy(lc->uuid, argv[0], sizeof(lc->uuid));
 	argc--;
 	argv++;
 	spin_lock_init(&lc->flush_lock);
@@ -299,7 +299,8 @@ static int userspace_ctr(struct dm_dirty_log *log, struct dm_target *ti,
 	}
 
 	if (lc->integrated_flush) {
-		lc->dmlog_wq = alloc_workqueue("dmlogd", WQ_MEM_RECLAIM, 0);
+		lc->dmlog_wq = alloc_workqueue("dmlogd",
+					       WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 		if (!lc->dmlog_wq) {
 			DMERR("couldn't start dmlogd");
 			r = -ENOMEM;
@@ -926,5 +927,5 @@ module_init(userspace_dirty_log_init);
 module_exit(userspace_dirty_log_exit);
 
 MODULE_DESCRIPTION(DM_NAME " userspace dirty log link");
-MODULE_AUTHOR("Jonathan Brassow <dm-devel@redhat.com>");
+MODULE_AUTHOR("Jonathan Brassow <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");

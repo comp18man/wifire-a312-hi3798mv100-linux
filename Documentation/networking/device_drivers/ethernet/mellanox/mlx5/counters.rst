@@ -189,27 +189,49 @@ the software port.
 
    * - `rx[i]_gro_packets`
      - Number of received packets processed using hardware-accelerated GRO. The
-       number of hardware GRO offloaded packets received on ring i.
+       number of hardware GRO offloaded packets received on ring i. Only true GRO
+       packets are counted: only packets that are in an SKB with a GRO count > 1.
      - Acceleration
 
    * - `rx[i]_gro_bytes`
      - Number of received bytes processed using hardware-accelerated GRO. The
-       number of hardware GRO offloaded bytes received on ring i.
+       number of hardware GRO offloaded bytes received on ring i. Only true GRO
+       packets are counted: only packets that are in an SKB with a GRO count > 1.
      - Acceleration
 
    * - `rx[i]_gro_skbs`
-     - The number of receive SKBs constructed while performing
-       hardware-accelerated GRO.
-     - Informative
-
-   * - `rx[i]_gro_match_packets`
-     - Number of received packets processed using hardware-accelerated GRO that
-       met the flow table match criteria.
+     - The number of GRO SKBs constructed from hardware-accelerated GRO. Only SKBs
+       with a GRO count > 1 are counted.
      - Informative
 
    * - `rx[i]_gro_large_hds`
      - Number of receive packets using hardware-accelerated GRO that have large
        headers that require additional memory to be allocated.
+     - Informative
+
+   * - `rx[i]_hds_nodata_packets`
+     - Number of header only packets in header/data split mode [#accel]_.
+     - Informative
+
+   * - `rx[i]_hds_nodata_bytes`
+     - Number of bytes for header only packets in header/data split mode
+       [#accel]_.
+     - Informative
+
+   * - `rx[i]_hds_nosplit_packets`
+     - Number of packets that were not split in header/data split mode. A
+       packet will not get split when the hardware does not support its
+       protocol splitting. An example such a protocol is ICMPv4/v6. Currently
+       TCP and UDP with IPv4/IPv6 are supported for header/data split
+       [#accel]_.
+     - Informative
+
+   * - `rx[i]_hds_nosplit_bytes`
+     - Number of bytes for packets that were not split in header/data split
+       mode. A packet will not get split when the hardware does not support its
+       protocol splitting. An example such a protocol is ICMPv4/v6. Currently
+       TCP and UDP with IPv4/IPv6 are supported for header/data split
+       [#accel]_.
      - Informative
 
    * - `rx[i]_lro_packets`
@@ -300,6 +322,11 @@ the software port.
        in the beginning of the queue. This is a normal condition.
      - Informative
 
+   * - `tx[i]_timestamps`
+     - Transmitted packets that were hardware timestamped at the device's DMA
+       layer.
+     - Informative
+
    * - `tx[i]_added_vlan_packets`
      - The number of packets sent where vlan tag insertion was offloaded to the
        hardware.
@@ -346,30 +373,22 @@ the software port.
      - The number of receive packets with CQE compression on ring i [#accel]_.
      - Acceleration
 
-   * - `rx[i]_cache_reuse`
-     - The number of events of successful reuse of a page from a driver's
-       internal page cache.
+   * - `rx[i]_arfs_add`
+     - The number of aRFS flow rules added to the device for direct RQ steering
+       on ring i [#accel]_.
      - Acceleration
 
-   * - `rx[i]_cache_full`
-     - The number of events of full internal page cache where driver can't put a
-       page back to the cache for recycling (page will be freed).
+   * - `rx[i]_arfs_request_in`
+     - Number of flow rules that have been requested to move into ring i for
+       direct RQ steering [#accel]_.
      - Acceleration
 
-   * - `rx[i]_cache_empty`
-     - The number of events where cache was empty - no page to give. Driver
-       shall allocate new page.
+   * - `rx[i]_arfs_request_out`
+     - Number of flow rules that have been requested to move out of ring i [#accel]_.
      - Acceleration
 
-   * - `rx[i]_cache_busy`
-     - The number of events where cache head was busy and cannot be recycled.
-       Driver allocated new page.
-     - Acceleration
-
-   * - `rx[i]_cache_waive`
-     - The number of cache evacuation. This can occur due to page move to
-       another NUMA node or page was pfmemalloc-ed and should be freed as soon
-       as possible.
+   * - `rx[i]_arfs_expired`
+     - Number of flow rules that have been expired and removed [#accel]_.
      - Acceleration
 
    * - `rx[i]_arfs_err`
@@ -469,11 +488,6 @@ the software port.
    * - `rx[i]_xsk_buff_alloc_err`
      - The number of times allocating an skb or XSK buffer failed in the XSK RQ
        context.
-     - Error
-
-   * - `rx[i]_xsk_arfs_err`
-     - aRFS (accelerated Receive Flow Steering) does not occur in the XSK RQ
-       context, so this counter should never increment.
      - Error
 
    * - `rx[i]_xdp_tx_xmit`
@@ -709,6 +723,18 @@ the software port.
        time protocol.
      - Error
 
+   * - `ptp_cq[i]_late_cqe`
+     - Number of times a CQE has been delivered on the PTP timestamping CQ when
+       the CQE was not expected since a certain amount of time had elapsed where
+       the device typically ensures not posting the CQE.
+     - Error
+
+   * - `ptp_cq[i]_lost_cqe`
+     - Number of times a CQE is expected to not be delivered on the PTP
+       timestamping CQE by the device due to a time delta elapsing. If such a
+       CQE is somehow delivered, `ptp_cq[i]_late_cqe` is incremented.
+     - Error
+
 .. [#ring_global] The corresponding ring and global counters do not share the
                   same name (i.e. do not follow the common naming scheme).
 
@@ -821,6 +847,16 @@ Counters on the NIC port that is connected to a eSwitch.
    * - `tx_vport_rdma_multicast_bytes`
      - RDMA multicast bytes transmitted, steered from a port (counters counts
        RoCE/UD/RC traffic) [#accel]_.
+     - Acceleration
+
+   * - `vport_loopback_packets`
+     - Unicast, multicast and broadcast packets that were loop-back (received
+       and transmitted), IB/Eth  [#accel]_.
+     - Acceleration
+
+   * - `vport_loopback_bytes`
+     - Unicast, multicast and broadcast bytes that were loop-back (received
+       and transmitted), IB/Eth  [#accel]_.
      - Acceleration
 
    * - `rx_steer_missed_packets`
@@ -1044,6 +1080,11 @@ like flow control, FEC and more.
      - The number of times where the link operative state changed to down. In
        case this counter is increasing it may imply on port flapping. You may
        need to replace the cable/transceiver.
+     - Error
+
+   * - `total_success_recovery_phy`
+     - The number of total successful recovery events of any type during
+       ports reset cycle.
      - Error
 
    * - `rx_out_of_buffer`
@@ -1300,3 +1341,40 @@ Device Counters
      - The number of times the device owned queue had not enough buffers
        allocated.
      - Error
+
+   * - `pci_bw_inbound_high`
+     - The number of times the device crossed the high inbound pcie bandwidth
+       threshold. To be compared to pci_bw_inbound_low to check if the device
+       is in a congested state.
+       If pci_bw_inbound_high == pci_bw_inbound_low then the device is not congested.
+       If pci_bw_inbound_high > pci_bw_inbound_low then the device is congested.
+     - Informative
+
+   * - `pci_bw_inbound_low`
+     - The number of times the device crossed the low inbound PCIe bandwidth
+       threshold. To be compared to pci_bw_inbound_high to check if the device
+       is in a congested state.
+       If pci_bw_inbound_high == pci_bw_inbound_low then the device is not congested.
+       If pci_bw_inbound_high > pci_bw_inbound_low then the device is congested.
+     - Informative
+
+   * - `pci_bw_outbound_high`
+     - The number of times the device crossed the high outbound pcie bandwidth
+       threshold. To be compared to pci_bw_outbound_low to check if the device
+       is in a congested state.
+       If pci_bw_outbound_high == pci_bw_outbound_low then the device is not congested.
+       If pci_bw_outbound_high > pci_bw_outbound_low then the device is congested.
+     - Informative
+
+   * - `pci_bw_outbound_low`
+     - The number of times the device crossed the low outbound PCIe bandwidth
+       threshold. To be compared to pci_bw_outbound_high to check if the device
+       is in a congested state.
+       If pci_bw_outbound_high == pci_bw_outbound_low then the device is not congested.
+       If pci_bw_outbound_high > pci_bw_outbound_low then the device is congested.
+     - Informative
+
+   * - `pci_bw_stale_event`
+     - The number of times the device fired a PCIe congestion event but on query
+       there was no change in state.
+     - Informative

@@ -67,19 +67,23 @@ static struct perf_cpu_map *cpu_map__from_entries(const struct perf_record_cpu_m
 	struct perf_cpu_map *map;
 
 	map = perf_cpu_map__empty_new(data->cpus_data.nr);
-	if (map) {
-		unsigned i;
+	if (!map)
+		return NULL;
 
-		for (i = 0; i < data->cpus_data.nr; i++) {
-			/*
-			 * Special treatment for -1, which is not real cpu number,
-			 * and we need to use (int) -1 to initialize map[i],
-			 * otherwise it would become 65535.
-			 */
-			if (data->cpus_data.cpu[i] == (u16) -1)
-				map->map[i].cpu = -1;
-			else
-				map->map[i].cpu = (int) data->cpus_data.cpu[i];
+	for (unsigned int i = 0; i < data->cpus_data.nr; i++) {
+		/*
+		 * Special treatment for -1, which is not real cpu number,
+		 * and we need to use (int) -1 to initialize map[i],
+		 * otherwise it would become 65535.
+		 */
+		if (data->cpus_data.cpu[i] == (u16) -1) {
+			RC_CHK_ACCESS(map)->map[i].cpu = -1;
+		} else if (data->cpus_data.cpu[i] < INT16_MAX) {
+			RC_CHK_ACCESS(map)->map[i].cpu = (int16_t) data->cpus_data.cpu[i];
+		} else {
+			pr_err("Invalid cpumap entry %u\n", data->cpus_data.cpu[i]);
+			perf_cpu_map__put(map);
+			return NULL;
 		}
 	}
 
@@ -106,8 +110,15 @@ static struct perf_cpu_map *cpu_map__from_mask(const struct perf_record_cpu_map_
 		int cpu;
 
 		perf_record_cpu_map_data__read_one_mask(data, i, local_copy);
-		for_each_set_bit(cpu, local_copy, 64)
-			map->map[j++].cpu = cpu + cpus_per_i;
+		for_each_set_bit(cpu, local_copy, 64) {
+			if (cpu + cpus_per_i < INT16_MAX) {
+				RC_CHK_ACCESS(map)->map[j++].cpu = cpu + cpus_per_i;
+			} else {
+				pr_err("Invalid cpumap entry %d\n", cpu + cpus_per_i);
+				perf_cpu_map__put(map);
+				return NULL;
+			}
+		}
 	}
 	return map;
 
@@ -124,11 +135,18 @@ static struct perf_cpu_map *cpu_map__from_range(const struct perf_record_cpu_map
 		return NULL;
 
 	if (data->range_cpu_data.any_cpu)
-		map->map[i++].cpu = -1;
+		RC_CHK_ACCESS(map)->map[i++].cpu = -1;
 
 	for (int cpu = data->range_cpu_data.start_cpu; cpu <= data->range_cpu_data.end_cpu;
-	     i++, cpu++)
-		map->map[i].cpu = cpu;
+	     i++, cpu++) {
+		if (cpu < INT16_MAX) {
+			RC_CHK_ACCESS(map)->map[i].cpu = cpu;
+		} else {
+			pr_err("Invalid cpumap entry %d\n", cpu);
+			perf_cpu_map__put(map);
+			return NULL;
+		}
+	}
 
 	return map;
 }
@@ -160,16 +178,11 @@ size_t cpu_map__fprintf(struct perf_cpu_map *map, FILE *fp)
 
 struct perf_cpu_map *perf_cpu_map__empty_new(int nr)
 {
-	struct perf_cpu_map *cpus = malloc(sizeof(*cpus) + sizeof(int) * nr);
+	struct perf_cpu_map *cpus = perf_cpu_map__alloc(nr);
 
 	if (cpus != NULL) {
-		int i;
-
-		cpus->nr = nr;
-		for (i = 0; i < nr; i++)
-			cpus->map[i].cpu = -1;
-
-		refcount_set(&cpus->refcnt, 1);
+		for (int i = 0; i < nr; i++)
+			RC_CHK_ACCESS(cpus)->map[i].cpu = -1;
 	}
 
 	return cpus;
@@ -185,8 +198,6 @@ struct cpu_aggr_map *cpu_aggr_map__empty_new(int nr)
 		cpus->nr = nr;
 		for (i = 0; i < nr; i++)
 			cpus->map[i] = aggr_cpu_id__empty();
-
-		refcount_set(&cpus->refcnt, 1);
 	}
 
 	return cpus;
@@ -227,6 +238,12 @@ static int aggr_cpu_id__cmp(const void *a_pointer, const void *b_pointer)
 		return a->socket - b->socket;
 	else if (a->die != b->die)
 		return a->die - b->die;
+	else if (a->cluster != b->cluster)
+		return a->cluster - b->cluster;
+	else if (a->cache_lvl != b->cache_lvl)
+		return a->cache_lvl - b->cache_lvl;
+	else if (a->cache != b->cache)
+		return a->cache - b->cache;
 	else if (a->core != b->core)
 		return a->core - b->core;
 	else
@@ -239,7 +256,7 @@ struct cpu_aggr_map *cpu_aggr_map__new(const struct perf_cpu_map *cpus,
 {
 	int idx;
 	struct perf_cpu cpu;
-	struct cpu_aggr_map *c = cpu_aggr_map__empty_new(cpus->nr);
+	struct cpu_aggr_map *c = cpu_aggr_map__empty_new(perf_cpu_map__nr(cpus));
 
 	if (!c)
 		return NULL;
@@ -263,7 +280,7 @@ struct cpu_aggr_map *cpu_aggr_map__new(const struct perf_cpu_map *cpus,
 		}
 	}
 	/* Trim. */
-	if (c->nr != cpus->nr) {
+	if (c->nr != perf_cpu_map__nr(cpus)) {
 		struct cpu_aggr_map *trimmed_c =
 			realloc(c,
 				sizeof(struct cpu_aggr_map) + sizeof(struct aggr_cpu_id) * c->nr);
@@ -294,7 +311,7 @@ struct aggr_cpu_id aggr_cpu_id__die(struct perf_cpu cpu, void *data)
 
 	die = cpu__get_die_id(cpu);
 	/* There is no die_id on legacy system. */
-	if (die == -1)
+	if (die < 0)
 		die = 0;
 
 	/*
@@ -310,6 +327,30 @@ struct aggr_cpu_id aggr_cpu_id__die(struct perf_cpu cpu, void *data)
 	return id;
 }
 
+int cpu__get_cluster_id(struct perf_cpu cpu)
+{
+	int value, ret = cpu__get_topology_int(cpu.cpu, "cluster_id", &value);
+
+	return ret ?: value;
+}
+
+struct aggr_cpu_id aggr_cpu_id__cluster(struct perf_cpu cpu, void *data)
+{
+	int cluster = cpu__get_cluster_id(cpu);
+	struct aggr_cpu_id id;
+
+	/* There is no cluster_id on legacy system. */
+	if (cluster < 0)
+		cluster = 0;
+
+	id = aggr_cpu_id__die(cpu, data);
+	if (aggr_cpu_id__is_empty(&id))
+		return id;
+
+	id.cluster = cluster;
+	return id;
+}
+
 int cpu__get_core_id(struct perf_cpu cpu)
 {
 	int value, ret = cpu__get_topology_int(cpu.cpu, "core_id", &value);
@@ -321,8 +362,8 @@ struct aggr_cpu_id aggr_cpu_id__core(struct perf_cpu cpu, void *data)
 	struct aggr_cpu_id id;
 	int core = cpu__get_core_id(cpu);
 
-	/* aggr_cpu_id__die returns a struct with socket and die set. */
-	id = aggr_cpu_id__die(cpu, data);
+	/* aggr_cpu_id__die returns a struct with socket die, and cluster set. */
+	id = aggr_cpu_id__cluster(cpu, data);
 	if (aggr_cpu_id__is_empty(&id))
 		return id;
 
@@ -379,6 +420,12 @@ static int get_max_num(char *path, int *max)
 
 	buf[num] = '\0';
 
+	/* empty file — nothing to parse */
+	if (num == 0) {
+		err = -1;
+		goto out;
+	}
+
 	/* start on the right, to find highest node num */
 	while (--num) {
 		if ((buf[num] == ',') || (buf[num] == '-')) {
@@ -404,7 +451,7 @@ static void set_max_cpu_num(void)
 {
 	const char *mnt;
 	char path[PATH_MAX];
-	int ret = -1;
+	int max, ret = -1;
 
 	/* set up default */
 	max_cpu_num.cpu = 4096;
@@ -421,9 +468,21 @@ static void set_max_cpu_num(void)
 		goto out;
 	}
 
-	ret = get_max_num(path, &max_cpu_num.cpu);
+	ret = get_max_num(path, &max);
 	if (ret)
 		goto out;
+
+	/*
+	 * struct perf_cpu.cpu is int16_t (libperf ABI) — clamp to avoid
+	 * truncation to negative.  See tools/lib/perf/TODO for the ABI
+	 * widening plan.
+	 */
+	if (max > INT16_MAX) {
+		pr_warning("WARNING: max possible cpus %d exceeds int16_t, clamping to %d\n",
+			   max, INT16_MAX);
+		max = INT16_MAX;
+	}
+	max_cpu_num.cpu = max;
 
 	/* get the highest present cpu number for a sparse allocation */
 	ret = snprintf(path, PATH_MAX, "%s/devices/system/cpu/present", mnt);
@@ -432,8 +491,15 @@ static void set_max_cpu_num(void)
 		goto out;
 	}
 
-	ret = get_max_num(path, &max_present_cpu_num.cpu);
+	ret = get_max_num(path, &max);
 
+	if (!ret && max > INT16_MAX) {
+		pr_warning("WARNING: max present cpus %d exceeds int16_t, clamping to %d\n",
+			   max, INT16_MAX);
+		max = INT16_MAX;
+	}
+	if (!ret)
+		max_present_cpu_num.cpu = max;
 out:
 	if (ret)
 		pr_err("Failed to read max cpus, using default of %d\n", max_cpu_num.cpu);
@@ -498,6 +564,10 @@ int cpu__get_node(struct perf_cpu cpu)
 		pr_debug("cpu_map not initialized\n");
 		return -1;
 	}
+
+	/* cpunode_map allocated for max_cpu_num entries; input may be untrusted */
+	if (cpu.cpu < 0 || cpu.cpu >= max_cpu_num.cpu)
+		return -1;
 
 	return cpunode_map[cpu.cpu];
 }
@@ -566,7 +636,9 @@ int cpu__setup_cpunode_map(void)
 		while ((dent2 = readdir(dir2)) != NULL) {
 			if (dent2->d_type != DT_LNK || sscanf(dent2->d_name, "cpu%u", &cpu) < 1)
 				continue;
-			cpunode_map[cpu] = mem;
+			/* cpunode_map allocated for max_cpu_num entries */
+			if (cpu < (unsigned int)max_cpu_num.cpu)
+				cpunode_map[cpu] = mem;
 		}
 		closedir(dir2);
 	}
@@ -582,31 +654,31 @@ size_t cpu_map__snprint(struct perf_cpu_map *map, char *buf, size_t size)
 
 #define COMMA first ? "" : ","
 
-	for (i = 0; i < map->nr + 1; i++) {
-		struct perf_cpu cpu = { .cpu = INT_MAX };
-		bool last = i == map->nr;
+	for (i = 0; i < perf_cpu_map__nr(map) + 1; i++) {
+		struct perf_cpu cpu = { .cpu = INT16_MAX };
+		bool last = i == perf_cpu_map__nr(map);
 
 		if (!last)
-			cpu = map->map[i];
+			cpu = perf_cpu_map__cpu(map, i);
 
 		if (start == -1) {
 			start = i;
 			if (last) {
-				ret += snprintf(buf + ret, size - ret,
-						"%s%d", COMMA,
-						map->map[i].cpu);
+				ret += scnprintf(buf + ret, size - ret,
+						 "%s%d", COMMA,
+						 perf_cpu_map__cpu(map, i).cpu);
 			}
-		} else if (((i - start) != (cpu.cpu - map->map[start].cpu)) || last) {
+		} else if (((i - start) != (cpu.cpu - perf_cpu_map__cpu(map, start).cpu)) || last) {
 			int end = i - 1;
 
 			if (start == end) {
-				ret += snprintf(buf + ret, size - ret,
-						"%s%d", COMMA,
-						map->map[start].cpu);
+				ret += scnprintf(buf + ret, size - ret,
+						 "%s%d", COMMA,
+						 perf_cpu_map__cpu(map, start).cpu);
 			} else {
-				ret += snprintf(buf + ret, size - ret,
-						"%s%d-%d", COMMA,
-						map->map[start].cpu, map->map[end].cpu);
+				ret += scnprintf(buf + ret, size - ret,
+						 "%s%d-%d", COMMA,
+						 perf_cpu_map__cpu(map, start).cpu, perf_cpu_map__cpu(map, end).cpu);
 			}
 			first = false;
 			start = i;
@@ -630,10 +702,10 @@ static char hex_char(unsigned char val)
 
 size_t cpu_map__snprint_mask(struct perf_cpu_map *map, char *buf, size_t size)
 {
-	int i, cpu;
+	int idx;
 	char *ptr = buf;
 	unsigned char *bitmap;
-	struct perf_cpu last_cpu = perf_cpu_map__cpu(map, map->nr - 1);
+	struct perf_cpu c, last_cpu = perf_cpu_map__max(map);
 
 	if (buf == NULL)
 		return 0;
@@ -644,12 +716,10 @@ size_t cpu_map__snprint_mask(struct perf_cpu_map *map, char *buf, size_t size)
 		return 0;
 	}
 
-	for (i = 0; i < map->nr; i++) {
-		cpu = perf_cpu_map__cpu(map, i).cpu;
-		bitmap[cpu / 8] |= 1 << (cpu % 8);
-	}
+	perf_cpu_map__for_each_cpu(c, idx, map)
+		bitmap[c.cpu / 8] |= 1 << (c.cpu % 8);
 
-	for (cpu = last_cpu.cpu / 4 * 4; cpu >= 0; cpu -= 4) {
+	for (int cpu = last_cpu.cpu / 4 * 4; cpu >= 0; cpu -= 4) {
 		unsigned char bits = bitmap[cpu / 8];
 
 		if (cpu % 8)
@@ -668,14 +738,14 @@ size_t cpu_map__snprint_mask(struct perf_cpu_map *map, char *buf, size_t size)
 	return ptr - buf;
 }
 
-const struct perf_cpu_map *cpu_map__online(void) /* thread unsafe */
+struct perf_cpu_map *cpu_map__online(void) /* thread unsafe */
 {
-	static const struct perf_cpu_map *online = NULL;
+	static struct perf_cpu_map *online;
 
 	if (!online)
-		online = perf_cpu_map__new(NULL); /* from /sys/devices/system/cpu/online */
+		online = perf_cpu_map__new_online_cpus(); /* from /sys/devices/system/cpu/online */
 
-	return online;
+	return perf_cpu_map__get(online);
 }
 
 bool aggr_cpu_id__equal(const struct aggr_cpu_id *a, const struct aggr_cpu_id *b)
@@ -684,6 +754,9 @@ bool aggr_cpu_id__equal(const struct aggr_cpu_id *a, const struct aggr_cpu_id *b
 		a->node == b->node &&
 		a->socket == b->socket &&
 		a->die == b->die &&
+		a->cluster == b->cluster &&
+		a->cache_lvl == b->cache_lvl &&
+		a->cache == b->cache &&
 		a->core == b->core &&
 		a->cpu.cpu == b->cpu.cpu;
 }
@@ -694,6 +767,9 @@ bool aggr_cpu_id__is_empty(const struct aggr_cpu_id *a)
 		a->node == -1 &&
 		a->socket == -1 &&
 		a->die == -1 &&
+		a->cluster == -1 &&
+		a->cache_lvl == -1 &&
+		a->cache == -1 &&
 		a->core == -1 &&
 		a->cpu.cpu == -1;
 }
@@ -705,6 +781,9 @@ struct aggr_cpu_id aggr_cpu_id__empty(void)
 		.node = -1,
 		.socket = -1,
 		.die = -1,
+		.cluster = -1,
+		.cache_lvl = -1,
+		.cache = -1,
 		.core = -1,
 		.cpu = (struct perf_cpu){ .cpu = -1 },
 	};

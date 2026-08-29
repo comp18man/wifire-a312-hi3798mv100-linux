@@ -14,7 +14,6 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/reboot.h>
 #include <linux/regmap.h>
@@ -50,7 +49,10 @@
 #define  PON_RESIN_PULL_UP		BIT(0)
 
 #define PON_DBC_CTL			0x71
-#define  PON_DBC_DELAY_MASK		0x7
+#define  PON_DBC_DELAY_MASK_GEN1	0x7
+#define  PON_DBC_DELAY_MASK_GEN2	0xf
+#define  PON_DBC_SHIFT_GEN1		6
+#define  PON_DBC_SHIFT_GEN2		14
 
 struct pm8941_data {
 	unsigned int	pull_up_bit;
@@ -58,6 +60,7 @@ struct pm8941_data {
 	bool		supports_ps_hold_poff_config;
 	bool		supports_debounce_config;
 	bool		has_pon_pbs;
+	bool		wakeup_source_default;
 	const char	*name;
 	const char	*phys;
 };
@@ -152,8 +155,8 @@ static irqreturn_t pm8941_pwrkey_irq(int irq, void *_data)
 	if (pwrkey->sw_debounce_time_us) {
 		if (ktime_before(ktime_get(), pwrkey->sw_debounce_end_time)) {
 			dev_dbg(pwrkey->dev,
-				"ignoring key event received before debounce end %llu us\n",
-				pwrkey->sw_debounce_end_time);
+				"ignoring key event received before debounce end %lld us\n",
+				ktime_to_us(pwrkey->sw_debounce_end_time));
 			return IRQ_HANDLED;
 		}
 	}
@@ -243,11 +246,11 @@ static DEFINE_SIMPLE_DEV_PM_OPS(pm8941_pwr_key_pm_ops,
 static int pm8941_pwrkey_probe(struct platform_device *pdev)
 {
 	struct pm8941_pwrkey *pwrkey;
-	bool pull_up;
+	bool pull_up, wakeup;
 	struct device *parent;
 	struct device_node *regmap_node;
 	const __be32 *addr;
-	u32 req_delay;
+	u32 req_delay, mask, delay_shift;
 	int error;
 
 	if (of_property_read_u32(pdev->dev.of_node, "debounce", &req_delay))
@@ -336,12 +339,20 @@ static int pm8941_pwrkey_probe(struct platform_device *pdev)
 	pwrkey->input->phys = pwrkey->data->phys;
 
 	if (pwrkey->data->supports_debounce_config) {
-		req_delay = (req_delay << 6) / USEC_PER_SEC;
+		if (pwrkey->subtype >= PON_SUBTYPE_GEN2_PRIMARY) {
+			mask = PON_DBC_DELAY_MASK_GEN2;
+			delay_shift = PON_DBC_SHIFT_GEN2;
+		} else {
+			mask = PON_DBC_DELAY_MASK_GEN1;
+			delay_shift = PON_DBC_SHIFT_GEN1;
+		}
+
+		req_delay = (req_delay << delay_shift) / USEC_PER_SEC;
 		req_delay = ilog2(req_delay);
 
 		error = regmap_update_bits(pwrkey->regmap,
 					   pwrkey->baseaddr + PON_DBC_CTL,
-					   PON_DBC_DELAY_MASK,
+					   mask,
 					   req_delay);
 		if (error) {
 			dev_err(&pdev->dev, "failed to set debounce: %d\n",
@@ -392,20 +403,21 @@ static int pm8941_pwrkey_probe(struct platform_device *pdev)
 		}
 	}
 
+	wakeup = pwrkey->data->wakeup_source_default ||
+		of_property_read_bool(pdev->dev.of_node, "wakeup-source");
+
 	platform_set_drvdata(pdev, pwrkey);
-	device_init_wakeup(&pdev->dev, 1);
+	device_init_wakeup(&pdev->dev, wakeup);
 
 	return 0;
 }
 
-static int pm8941_pwrkey_remove(struct platform_device *pdev)
+static void pm8941_pwrkey_remove(struct platform_device *pdev)
 {
 	struct pm8941_pwrkey *pwrkey = platform_get_drvdata(pdev);
 
 	if (pwrkey->data->supports_ps_hold_poff_config)
 		unregister_reboot_notifier(&pwrkey->reboot_notifier);
-
-	return 0;
 }
 
 static const struct pm8941_data pwrkey_data = {
@@ -416,6 +428,7 @@ static const struct pm8941_data pwrkey_data = {
 	.supports_ps_hold_poff_config = true,
 	.supports_debounce_config = true,
 	.has_pon_pbs = false,
+	.wakeup_source_default = true,
 };
 
 static const struct pm8941_data resin_data = {
@@ -426,6 +439,7 @@ static const struct pm8941_data resin_data = {
 	.supports_ps_hold_poff_config = true,
 	.supports_debounce_config = true,
 	.has_pon_pbs = false,
+	.wakeup_source_default = false,
 };
 
 static const struct pm8941_data pon_gen3_pwrkey_data = {
@@ -435,6 +449,7 @@ static const struct pm8941_data pon_gen3_pwrkey_data = {
 	.supports_ps_hold_poff_config = false,
 	.supports_debounce_config = false,
 	.has_pon_pbs = true,
+	.wakeup_source_default = true,
 };
 
 static const struct pm8941_data pon_gen3_resin_data = {
@@ -444,6 +459,7 @@ static const struct pm8941_data pon_gen3_resin_data = {
 	.supports_ps_hold_poff_config = false,
 	.supports_debounce_config = false,
 	.has_pon_pbs = true,
+	.wakeup_source_default = false,
 };
 
 static const struct of_device_id pm8941_pwr_key_id_table[] = {

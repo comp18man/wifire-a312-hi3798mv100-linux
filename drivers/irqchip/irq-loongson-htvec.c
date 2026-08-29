@@ -15,8 +15,9 @@
 #include <linux/platform_device.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
 #include <linux/syscore_ops.h>
+
+#include "irq-loongson.h"
 
 /* Registers */
 #define HTVEC_EN_OFF		0x20
@@ -247,7 +248,7 @@ static int htvec_of_init(struct device_node *node,
 	}
 
 	err = htvec_init(res.start, resource_size(&res),
-			num_parents, parent_irq, of_node_to_fwnode(node));
+			num_parents, parent_irq, of_fwnode_handle(node));
 	if (err < 0)
 		return err;
 

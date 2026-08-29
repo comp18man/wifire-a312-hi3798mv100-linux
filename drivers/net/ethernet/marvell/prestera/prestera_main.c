@@ -280,6 +280,7 @@ prestera_mac_select_pcs(struct phylink_config *config,
 }
 
 static void prestera_pcs_get_state(struct phylink_pcs *pcs,
+				   unsigned int neg_mode,
 				   struct phylink_link_state *state)
 {
 	struct prestera_port *port = container_of(pcs, struct prestera_port,
@@ -300,8 +301,7 @@ static void prestera_pcs_get_state(struct phylink_pcs *pcs,
 	}
 }
 
-static int prestera_pcs_config(struct phylink_pcs *pcs,
-			       unsigned int mode,
+static int prestera_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 			       phy_interface_t interface,
 			       const unsigned long *advertising,
 			       bool permit_pause_to_mac)
@@ -316,30 +316,25 @@ static int prestera_pcs_config(struct phylink_pcs *pcs,
 
 	cfg_mac.admin = true;
 	cfg_mac.fec = PRESTERA_PORT_FEC_OFF;
+	cfg_mac.inband = neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED;
 
 	switch (interface) {
 	case PHY_INTERFACE_MODE_10GBASER:
 		cfg_mac.speed = SPEED_10000;
-		cfg_mac.inband = 0;
 		cfg_mac.mode = PRESTERA_MAC_MODE_SR_LR;
 		break;
 	case PHY_INTERFACE_MODE_2500BASEX:
 		cfg_mac.speed = SPEED_2500;
 		cfg_mac.duplex = DUPLEX_FULL;
-		cfg_mac.inband = test_bit(ETHTOOL_LINK_MODE_Autoneg_BIT,
-					  advertising);
 		cfg_mac.mode = PRESTERA_MAC_MODE_SGMII;
 		break;
 	case PHY_INTERFACE_MODE_SGMII:
-		cfg_mac.inband = 1;
 		cfg_mac.mode = PRESTERA_MAC_MODE_SGMII;
 		break;
 	case PHY_INTERFACE_MODE_1000BASEX:
 	default:
 		cfg_mac.speed = SPEED_1000;
 		cfg_mac.duplex = DUPLEX_FULL;
-		cfg_mac.inband = test_bit(ETHTOOL_LINK_MODE_Autoneg_BIT,
-					  advertising);
 		cfg_mac.mode = PRESTERA_MAC_MODE_1000BASE_X;
 		break;
 	}
@@ -378,7 +373,7 @@ static int prestera_port_sfp_bind(struct prestera_port *port)
 	struct device_node *ports, *node;
 	struct fwnode_handle *fwnode;
 	struct phylink *phy_link;
-	int err;
+	int err = 0;
 
 	if (!sw->np)
 		return 0;
@@ -494,7 +489,7 @@ static int prestera_port_change_mtu(struct net_device *dev, int mtu)
 	if (err)
 		return err;
 
-	dev->mtu = mtu;
+	WRITE_ONCE(dev->mtu, mtu);
 
 	return 0;
 }
@@ -638,7 +633,8 @@ static int prestera_port_create(struct prestera_switch *sw, u32 id)
 	if (err)
 		goto err_dl_port_register;
 
-	dev->features |= NETIF_F_NETNS_LOCAL | NETIF_F_HW_TC;
+	dev->features |= NETIF_F_HW_TC;
+	dev->netns_immutable = true;
 	dev->netdev_ops = &prestera_netdev_ops;
 	dev->ethtool_ops = &prestera_ethtool_ops;
 	SET_NETDEV_DEV(dev, sw->dev->dev);
@@ -826,7 +822,7 @@ static void prestera_port_handle_event(struct prestera_switch *sw,
 
 		if (port->state_mac.oper) {
 			if (port->phy_link)
-				phylink_mac_change(port->phy_link, true);
+				phylink_pcs_change(&port->phylink_pcs, true);
 			else
 				netif_carrier_on(port->dev);
 
@@ -834,7 +830,7 @@ static void prestera_port_handle_event(struct prestera_switch *sw,
 				queue_delayed_work(prestera_wq, caching_dw, 0);
 		} else {
 			if (port->phy_link)
-				phylink_mac_change(port->phy_link, false);
+				phylink_pcs_change(&port->phylink_pcs, false);
 			else if (netif_running(port->dev) && netif_carrier_ok(port->dev))
 				netif_carrier_off(port->dev);
 
@@ -1504,7 +1500,7 @@ EXPORT_SYMBOL(prestera_device_unregister);
 
 static int __init prestera_module_init(void)
 {
-	prestera_wq = alloc_workqueue("prestera", 0, 0);
+	prestera_wq = alloc_workqueue("prestera", WQ_PERCPU, 0);
 	if (!prestera_wq)
 		return -ENOMEM;
 

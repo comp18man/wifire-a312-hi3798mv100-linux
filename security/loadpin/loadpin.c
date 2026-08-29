@@ -20,6 +20,7 @@
 #include <linux/string_helpers.h>
 #include <linux/dm-verity-loadpin.h>
 #include <uapi/linux/loadpin.h>
+#include <uapi/linux/lsm.h>
 
 #define VERITY_DIGEST_FILE_HEADER "# LOADPIN_TRUSTED_VERITY_ROOT_DIGESTS"
 
@@ -52,12 +53,6 @@ static bool deny_reading_verity_digests;
 #endif
 
 #ifdef CONFIG_SYSCTL
-static struct ctl_path loadpin_sysctl_path[] = {
-	{ .procname = "kernel", },
-	{ .procname = "loadpin", },
-	{ }
-};
-
 static struct ctl_table loadpin_sysctl_table[] = {
 	{
 		.procname       = "enforce",
@@ -68,7 +63,6 @@ static struct ctl_table loadpin_sysctl_table[] = {
 		.extra1         = SYSCTL_ONE,
 		.extra2         = SYSCTL_ONE,
 	},
-	{ }
 };
 
 static void set_sysctl(bool is_writable)
@@ -214,7 +208,12 @@ static int loadpin_load_data(enum kernel_load_data_id id, bool contents)
 	return loadpin_check(NULL, (enum kernel_read_file_id) id);
 }
 
-static struct security_hook_list loadpin_hooks[] __lsm_ro_after_init = {
+static const struct lsm_id loadpin_lsmid = {
+	.name = "loadpin",
+	.id = LSM_ID_LOADPIN,
+};
+
+static struct security_hook_list loadpin_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(sb_free_security, loadpin_sb_free_security),
 	LSM_HOOK_INIT(kernel_read_file, loadpin_read_file),
 	LSM_HOOK_INIT(kernel_load_data, loadpin_load_data),
@@ -262,10 +261,11 @@ static int __init loadpin_init(void)
 		enforce ? "" : "not ");
 	parse_exclude();
 #ifdef CONFIG_SYSCTL
-	if (!register_sysctl_paths(loadpin_sysctl_path, loadpin_sysctl_table))
+	if (!register_sysctl("kernel/loadpin", loadpin_sysctl_table))
 		pr_notice("sysctl registration failed!\n");
 #endif
-	security_add_hooks(loadpin_hooks, ARRAY_SIZE(loadpin_hooks), "loadpin");
+	security_add_hooks(loadpin_hooks, ARRAY_SIZE(loadpin_hooks),
+			   &loadpin_lsmid);
 
 	return 0;
 }
@@ -283,7 +283,6 @@ enum loadpin_securityfs_interface_index {
 
 static int read_trusted_verity_root_digests(unsigned int fd)
 {
-	struct fd f;
 	void *data;
 	int rc;
 	char *p, *d;
@@ -295,8 +294,8 @@ static int read_trusted_verity_root_digests(unsigned int fd)
 	if (!list_empty(&dm_verity_loadpin_trusted_root_digests))
 		return -EPERM;
 
-	f = fdget(fd);
-	if (!f.file)
+	CLASS(fd, f)(fd);
+	if (fd_empty(f))
 		return -EINVAL;
 
 	data = kzalloc(SZ_4K, GFP_KERNEL);
@@ -305,7 +304,7 @@ static int read_trusted_verity_root_digests(unsigned int fd)
 		goto err;
 	}
 
-	rc = kernel_read_file(f.file, 0, (void **)&data, SZ_4K - 1, NULL, READING_POLICY);
+	rc = kernel_read_file(fd_file(f), 0, (void **)&data, SZ_4K - 1, NULL, READING_POLICY);
 	if (rc < 0)
 		goto err;
 
@@ -342,14 +341,13 @@ static int read_trusted_verity_root_digests(unsigned int fd)
 			rc = -ENOMEM;
 			goto err;
 		}
+		trd->len = len;
 
 		if (hex2bin(trd->data, d, len)) {
 			kfree(trd);
 			rc = -EPROTO;
 			goto err;
 		}
-
-		trd->len = len;
 
 		list_add_tail(&trd->node, &dm_verity_loadpin_trusted_root_digests);
 	}
@@ -360,7 +358,6 @@ static int read_trusted_verity_root_digests(unsigned int fd)
 	}
 
 	kfree(data);
-	fdput(f);
 
 	return 0;
 
@@ -379,8 +376,6 @@ err:
 
 	/* disallow further attempts after reading a corrupt/invalid file */
 	deny_reading_verity_digests = true;
-
-	fdput(f);
 
 	return rc;
 }

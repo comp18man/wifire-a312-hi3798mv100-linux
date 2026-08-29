@@ -221,7 +221,7 @@ static int vcap_test_port_info(struct net_device *ndev,
 	return 0;
 }
 
-static struct vcap_operations test_callbacks = {
+static const struct vcap_operations test_callbacks = {
 	.validate_keyset = test_val_keyset,
 	.add_default_fields = test_add_def_fields,
 	.cache_erase = test_cache_erase,
@@ -243,10 +243,11 @@ static void vcap_test_api_init(struct vcap_admin *admin)
 {
 	/* Initialize the shared objects */
 	INIT_LIST_HEAD(&test_vctrl.list);
+	mutex_init(&test_vctrl.lock);
 	INIT_LIST_HEAD(&admin->list);
 	INIT_LIST_HEAD(&admin->rules);
 	INIT_LIST_HEAD(&admin->enabled);
-	mutex_init(&admin->lock);
+	admin->vctrl = &test_vctrl;
 	list_add_tail(&admin->list, &test_vctrl.list);
 	memset(test_updateaddr, 0, sizeof(test_updateaddr));
 	test_updateaddridx = 0;
@@ -387,7 +388,7 @@ static const char * const test_admin_info_expect[] = {
 	"default_cnt: 73\n",
 	"require_cnt_dis: 0\n",
 	"version: 1\n",
-	"vtype: 3\n",
+	"vtype: 4\n",
 	"vinst: 0\n",
 	"ingress: 1\n",
 	"first_cid: 10000\n",
@@ -435,7 +436,7 @@ static const char * const test_admin_expect[] = {
 	"default_cnt: 73\n",
 	"require_cnt_dis: 0\n",
 	"version: 1\n",
-	"vtype: 3\n",
+	"vtype: 4\n",
 	"vinst: 0\n",
 	"ingress: 1\n",
 	"first_cid: 8000000\n",

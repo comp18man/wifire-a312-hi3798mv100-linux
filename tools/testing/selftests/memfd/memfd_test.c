@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <sched.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -17,7 +18,11 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "common.h"
 
@@ -37,6 +42,20 @@
 		    F_SEAL_EXEC)
 
 #define MFD_NOEXEC_SEAL	0x0008U
+union semun {
+	int val;
+	struct semid_ds *buf;
+	unsigned short int *array;
+	struct seminfo *__buf;
+};
+
+/*
+ * we use semaphores on nested wait tasks due the use of CLONE_NEWPID: the
+ * child will be PID 1 and can't send SIGSTOP to themselves due special
+ * treatment of the init task, so the SIGSTOP/SIGCONT synchronization
+ * approach can't be used here.
+ */
+#define SEM_KEY 0xdeadbeef
 
 /*
  * Default is not to test hugetlbfs
@@ -93,12 +112,12 @@ static void sysctl_assert_write(const char *val)
 	int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
 
 	if (fd < 0) {
-		printf("open sysctl failed\n");
+		printf("open sysctl failed: %m\n");
 		abort();
 	}
 
 	if (write(fd, val, strlen(val)) < 0) {
-		printf("write sysctl failed\n");
+		printf("write sysctl %s failed: %m\n", val);
 		abort();
 	}
 }
@@ -108,13 +127,40 @@ static void sysctl_fail_write(const char *val)
 	int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
 
 	if (fd < 0) {
-		printf("open sysctl failed\n");
+		printf("open sysctl failed: %m\n");
 		abort();
 	}
 
 	if (write(fd, val, strlen(val)) >= 0) {
 		printf("write sysctl %s succeeded, but failure expected\n",
 				val);
+		abort();
+	}
+}
+
+static void sysctl_assert_equal(const char *val)
+{
+	char *p, buf[128] = {};
+	int fd = open("/proc/sys/vm/memfd_noexec", O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0) {
+		printf("open sysctl failed: %m\n");
+		abort();
+	}
+
+	if (read(fd, buf, sizeof(buf)) < 0) {
+		printf("read sysctl failed: %m\n");
+		abort();
+	}
+
+	/* Strip trailing whitespace. */
+	p = buf;
+	while (!isspace(*p))
+		p++;
+	*p = '\0';
+
+	if (strcmp(buf, val) != 0) {
+		printf("unexpected sysctl value: expected %s, got %s\n", val, buf);
 		abort();
 	}
 }
@@ -142,7 +188,7 @@ static void mfd_fail_new(const char *name, unsigned int flags)
 	r = sys_memfd_create(name, flags);
 	if (r >= 0) {
 		printf("memfd_create(\"%s\", %u) succeeded, but failure expected\n",
-		       name, flags);
+		       name ? name : "NULL", flags);
 		close(r);
 		abort();
 	}
@@ -164,7 +210,6 @@ static unsigned int mfd_assert_get_seals(int fd)
 static void mfd_assert_has_seals(int fd, unsigned int seals)
 {
 	char buf[PATH_MAX];
-	int nbytes;
 	unsigned int s;
 	fd2name(fd, buf, PATH_MAX);
 
@@ -243,6 +288,24 @@ static void *mfd_assert_mmap_shared(int fd)
 	p = mmap(NULL,
 		 mfd_def_size,
 		 PROT_READ | PROT_WRITE,
+		 MAP_SHARED,
+		 fd,
+		 0);
+	if (p == MAP_FAILED) {
+		printf("mmap() failed: %m\n");
+		abort();
+	}
+
+	return p;
+}
+
+static void *mfd_assert_mmap_read_shared(int fd)
+{
+	void *p;
+
+	p = mmap(NULL,
+		 mfd_def_size,
+		 PROT_READ,
 		 MAP_SHARED,
 		 fd,
 		 0);
@@ -666,7 +729,6 @@ static void mfd_assert_mode(int fd, int mode)
 {
 	struct stat st;
 	char buf[PATH_MAX];
-	int nbytes;
 
 	fd2name(fd, buf, PATH_MAX);
 
@@ -685,7 +747,6 @@ static void mfd_assert_mode(int fd, int mode)
 static void mfd_assert_chmod(int fd, int mode)
 {
 	char buf[PATH_MAX];
-	int nbytes;
 
 	fd2name(fd, buf, PATH_MAX);
 
@@ -701,7 +762,6 @@ static void mfd_fail_chmod(int fd, int mode)
 {
 	struct stat st;
 	char buf[PATH_MAX];
-	int nbytes;
 
 	fd2name(fd, buf, PATH_MAX);
 
@@ -733,7 +793,7 @@ static int idle_thread_fn(void *arg)
 	return 0;
 }
 
-static pid_t spawn_idle_thread(unsigned int flags)
+static pid_t spawn_thread(unsigned int flags, int (*fn)(void *), void *arg)
 {
 	uint8_t *stack;
 	pid_t pid;
@@ -744,16 +804,40 @@ static pid_t spawn_idle_thread(unsigned int flags)
 		abort();
 	}
 
-	pid = clone(idle_thread_fn,
-		    stack + STACK_SIZE,
-		    SIGCHLD | flags,
-		    NULL);
+	pid = clone(fn, stack + STACK_SIZE, SIGCHLD | flags, arg);
 	if (pid < 0) {
 		printf("clone() failed: %m\n");
 		abort();
 	}
 
 	return pid;
+}
+
+static void join_thread(pid_t pid)
+{
+	int wstatus;
+
+	if (waitpid(pid, &wstatus, 0) < 0) {
+		printf("newpid thread: waitpid() failed: %m\n");
+		abort();
+	}
+
+	if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) != 0) {
+		printf("newpid thread: exited with non-zero error code %d\n",
+		       WEXITSTATUS(wstatus));
+		abort();
+	}
+
+	if (WIFSIGNALED(wstatus)) {
+		printf("newpid thread: killed by signal %d\n",
+		       WTERMSIG(wstatus));
+		abort();
+	}
+}
+
+static pid_t spawn_idle_thread(unsigned int flags)
+{
+	return spawn_thread(flags, idle_thread_fn, NULL);
 }
 
 static void join_idle_thread(pid_t pid)
@@ -928,6 +1012,30 @@ static void test_seal_future_write(void)
 
 	munmap(p, mfd_def_size);
 	close(fd2);
+	close(fd);
+}
+
+static void test_seal_write_map_read_shared(void)
+{
+	int fd;
+	void *p;
+
+	printf("%s SEAL-WRITE-MAP-READ\n", memfd_str);
+
+	fd = mfd_assert_new("kern_memfd_seal_write_map_read",
+			    mfd_def_size,
+			    MFD_CLOEXEC | MFD_ALLOW_SEALING);
+
+	mfd_assert_add_seals(fd, F_SEAL_WRITE);
+	mfd_assert_has_seals(fd, F_SEAL_WRITE);
+
+	p = mfd_assert_mmap_read_shared(fd);
+
+	mfd_assert_read(fd);
+	mfd_assert_read_shared(fd);
+	mfd_fail_write(fd);
+
+	munmap(p, mfd_def_size);
 	close(fd);
 }
 
@@ -1108,110 +1216,336 @@ static void test_noexec_seal(void)
 	close(fd);
 }
 
-static void test_sysctl_child(void)
+static void test_sysctl_sysctl0(void)
 {
 	int fd;
 
-	printf("%s sysctl 0\n", memfd_str);
-	sysctl_assert_write("0");
-	fd = mfd_assert_new("kern_memfd_sysctl_0",
+	sysctl_assert_equal("0");
+
+	fd = mfd_assert_new("kern_memfd_sysctl_0_dfl",
 			    mfd_def_size,
 			    MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	mfd_assert_mode(fd, 0777);
+	mfd_assert_has_seals(fd, 0);
+	mfd_assert_chmod(fd, 0644);
+	close(fd);
+}
 
+static void test_sysctl_set_sysctl0(void)
+{
+	sysctl_assert_write("0");
+	test_sysctl_sysctl0();
+}
+
+static void test_sysctl_sysctl1(void)
+{
+	int fd;
+
+	sysctl_assert_equal("1");
+
+	fd = mfd_assert_new("kern_memfd_sysctl_1_dfl",
+			    mfd_def_size,
+			    MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	mfd_assert_mode(fd, 0666);
+	mfd_assert_has_seals(fd, F_SEAL_EXEC);
+	mfd_fail_chmod(fd, 0777);
+	close(fd);
+
+	fd = mfd_assert_new("kern_memfd_sysctl_1_exec",
+			    mfd_def_size,
+			    MFD_CLOEXEC | MFD_EXEC | MFD_ALLOW_SEALING);
 	mfd_assert_mode(fd, 0777);
 	mfd_assert_has_seals(fd, 0);
 	mfd_assert_chmod(fd, 0644);
 	close(fd);
 
-	printf("%s sysctl 1\n", memfd_str);
-	sysctl_assert_write("1");
-	fd = mfd_assert_new("kern_memfd_sysctl_1",
+	fd = mfd_assert_new("kern_memfd_sysctl_1_noexec",
 			    mfd_def_size,
-			    MFD_CLOEXEC | MFD_ALLOW_SEALING);
-
+			    MFD_CLOEXEC | MFD_NOEXEC_SEAL | MFD_ALLOW_SEALING);
 	mfd_assert_mode(fd, 0666);
 	mfd_assert_has_seals(fd, F_SEAL_EXEC);
 	mfd_fail_chmod(fd, 0777);
-	sysctl_fail_write("0");
 	close(fd);
-
-	printf("%s sysctl 2\n", memfd_str);
-	sysctl_assert_write("2");
-	mfd_fail_new("kern_memfd_sysctl_2",
-		MFD_CLOEXEC | MFD_ALLOW_SEALING);
-	sysctl_fail_write("0");
-	sysctl_fail_write("1");
 }
 
-static int newpid_thread_fn(void *arg)
+static void test_sysctl_set_sysctl1(void)
 {
-	test_sysctl_child();
-	return 0;
+	sysctl_assert_write("1");
+	test_sysctl_sysctl1();
 }
 
-static void test_sysctl_child2(void)
+static void test_sysctl_sysctl2(void)
 {
 	int fd;
 
-	sysctl_fail_write("0");
-	fd = mfd_assert_new("kern_memfd_sysctl_1",
+	sysctl_assert_equal("2");
+
+	fd = mfd_assert_new("kern_memfd_sysctl_2_dfl",
 			    mfd_def_size,
 			    MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	mfd_assert_mode(fd, 0666);
+	mfd_assert_has_seals(fd, F_SEAL_EXEC);
+	mfd_fail_chmod(fd, 0777);
+	close(fd);
 
+	mfd_fail_new("kern_memfd_sysctl_2_exec",
+		     MFD_CLOEXEC | MFD_EXEC | MFD_ALLOW_SEALING);
+
+	fd = mfd_assert_new("kern_memfd_sysctl_2_noexec",
+			    mfd_def_size,
+			    MFD_CLOEXEC | MFD_NOEXEC_SEAL | MFD_ALLOW_SEALING);
 	mfd_assert_mode(fd, 0666);
 	mfd_assert_has_seals(fd, F_SEAL_EXEC);
 	mfd_fail_chmod(fd, 0777);
 	close(fd);
 }
 
-static int newpid_thread_fn2(void *arg)
+static void test_sysctl_set_sysctl2(void)
 {
-	test_sysctl_child2();
+	sysctl_assert_write("2");
+	test_sysctl_sysctl2();
+}
+
+static int sysctl_simple_child(void *arg)
+{
+	printf("%s sysctl 0\n", memfd_str);
+	test_sysctl_set_sysctl0();
+
+	printf("%s sysctl 1\n", memfd_str);
+	test_sysctl_set_sysctl1();
+
+	printf("%s sysctl 0\n", memfd_str);
+	test_sysctl_set_sysctl0();
+
+	printf("%s sysctl 2\n", memfd_str);
+	test_sysctl_set_sysctl2();
+
+	printf("%s sysctl 1\n", memfd_str);
+	test_sysctl_set_sysctl1();
+
+	printf("%s sysctl 0\n", memfd_str);
+	test_sysctl_set_sysctl0();
+
 	return 0;
-}
-static pid_t spawn_newpid_thread(unsigned int flags, int (*fn)(void *))
-{
-	uint8_t *stack;
-	pid_t pid;
-
-	stack = malloc(STACK_SIZE);
-	if (!stack) {
-		printf("malloc(STACK_SIZE) failed: %m\n");
-		abort();
-	}
-
-	pid = clone(fn,
-		    stack + STACK_SIZE,
-		    SIGCHLD | flags,
-		    NULL);
-	if (pid < 0) {
-		printf("clone() failed: %m\n");
-		abort();
-	}
-
-	return pid;
-}
-
-static void join_newpid_thread(pid_t pid)
-{
-	waitpid(pid, NULL, 0);
 }
 
 /*
  * Test sysctl
- * A very basic sealing test to see whether setting/retrieving seals works.
+ * A very basic test to make sure the core sysctl semantics work.
  */
-static void test_sysctl(void)
+static void test_sysctl_simple(void)
 {
-	int pid = spawn_newpid_thread(CLONE_NEWPID, newpid_thread_fn);
+	int pid = spawn_thread(CLONE_NEWPID, sysctl_simple_child, NULL);
 
-	join_newpid_thread(pid);
+	join_thread(pid);
+}
 
-	printf("%s child ns\n", memfd_str);
+static int sysctl_nested(void *arg)
+{
+	void (*fn)(void) = arg;
+
+	fn();
+	return 0;
+}
+
+static int sysctl_nested_wait(void *arg)
+{
+	int sem = semget(SEM_KEY, 1, 0600);
+	struct sembuf sembuf;
+
+	if (sem < 0) {
+		perror("semget:");
+		abort();
+	}
+	sembuf.sem_num = 0;
+	sembuf.sem_flg = 0;
+	sembuf.sem_op = 0;
+
+	if (semop(sem, &sembuf, 1) < 0) {
+		perror("semop:");
+		abort();
+	}
+
+	return sysctl_nested(arg);
+}
+
+static void test_sysctl_sysctl1_failset(void)
+{
+	sysctl_fail_write("0");
+	test_sysctl_sysctl1();
+}
+
+static void test_sysctl_sysctl2_failset(void)
+{
+	sysctl_fail_write("1");
+	test_sysctl_sysctl2();
+
+	sysctl_fail_write("0");
+	test_sysctl_sysctl2();
+}
+
+static int sysctl_nested_child(void *arg)
+{
+	int pid, sem;
+	union semun semun;
+	struct sembuf sembuf;
+
+	printf("%s nested sysctl 0\n", memfd_str);
+	sysctl_assert_write("0");
+	/* A further nested pidns works the same. */
+	pid = spawn_thread(CLONE_NEWPID, sysctl_simple_child, NULL);
+	join_thread(pid);
+
+	printf("%s nested sysctl 1\n", memfd_str);
+	sysctl_assert_write("1");
+	/* Child inherits our setting. */
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested, test_sysctl_sysctl1);
+	join_thread(pid);
+	/* Child cannot raise the setting. */
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested,
+			   test_sysctl_sysctl1_failset);
+	join_thread(pid);
+	/* Child can lower the setting. */
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested,
+			   test_sysctl_set_sysctl2);
+	join_thread(pid);
+	/* Child lowering the setting has no effect on our setting. */
+	test_sysctl_sysctl1();
+
+	printf("%s nested sysctl 2\n", memfd_str);
+	sysctl_assert_write("2");
+	/* Child inherits our setting. */
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested, test_sysctl_sysctl2);
+	join_thread(pid);
+	/* Child cannot raise the setting. */
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested,
+			   test_sysctl_sysctl2_failset);
+	join_thread(pid);
+
+	sem = semget(SEM_KEY, 1, IPC_CREAT | 0600);
+	if (sem < 0) {
+		perror("semget:");
+		return 1;
+	}
+	semun.val = 1;
+	sembuf.sem_op = -1;
+	sembuf.sem_flg = 0;
+	sembuf.sem_num = 0;
+
+	/* Verify that the rules are actually inherited after fork. */
+	printf("%s nested sysctl 0 -> 1 after fork\n", memfd_str);
+	sysctl_assert_write("0");
+
+	if (semctl(sem, 0, SETVAL, semun) < 0) {
+		perror("semctl:");
+		return 1;
+	}
+
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested_wait,
+			   test_sysctl_sysctl1_failset);
 	sysctl_assert_write("1");
 
-	pid = spawn_newpid_thread(CLONE_NEWPID, newpid_thread_fn2);
-	join_newpid_thread(pid);
+	/* Allow child to continue */
+	if (semop(sem, &sembuf, 1) < 0) {
+		perror("semop:");
+		return 1;
+	}
+	join_thread(pid);
+
+	printf("%s nested sysctl 0 -> 2 after fork\n", memfd_str);
+	sysctl_assert_write("0");
+
+	if (semctl(sem, 0, SETVAL, semun) < 0) {
+		perror("semctl:");
+		return 1;
+	}
+
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested_wait,
+			   test_sysctl_sysctl2_failset);
+	sysctl_assert_write("2");
+
+	/* Allow child to continue */
+	if (semop(sem, &sembuf, 1) < 0) {
+		perror("semop:");
+		return 1;
+	}
+	join_thread(pid);
+
+	/*
+	 * Verify that the current effective setting is saved on fork, meaning
+	 * that the parent lowering the sysctl doesn't affect already-forked
+	 * children.
+	 */
+	printf("%s nested sysctl 2 -> 1 after fork\n", memfd_str);
+	sysctl_assert_write("2");
+
+	if (semctl(sem, 0, SETVAL, semun) < 0) {
+		perror("semctl:");
+		return 1;
+	}
+
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested_wait,
+			   test_sysctl_sysctl2);
+	sysctl_assert_write("1");
+
+	/* Allow child to continue */
+	if (semop(sem, &sembuf, 1) < 0) {
+		perror("semop:");
+		return 1;
+	}
+	join_thread(pid);
+
+	printf("%s nested sysctl 2 -> 0 after fork\n", memfd_str);
+	sysctl_assert_write("2");
+
+	if (semctl(sem, 0, SETVAL, semun) < 0) {
+		perror("semctl:");
+		return 1;
+	}
+
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested_wait,
+			   test_sysctl_sysctl2);
+	sysctl_assert_write("0");
+
+	/* Allow child to continue */
+	if (semop(sem, &sembuf, 1) < 0) {
+		perror("semop:");
+		return 1;
+	}
+	join_thread(pid);
+
+	printf("%s nested sysctl 1 -> 0 after fork\n", memfd_str);
+	sysctl_assert_write("1");
+
+	if (semctl(sem, 0, SETVAL, semun) < 0) {
+		perror("semctl:");
+		return 1;
+	}
+
+	pid = spawn_thread(CLONE_NEWPID, sysctl_nested_wait,
+			   test_sysctl_sysctl1);
+	sysctl_assert_write("0");
+	/* Allow child to continue */
+	if (semop(sem, &sembuf, 1) < 0) {
+		perror("semop:");
+		return 1;
+	}
+	join_thread(pid);
+
+	semctl(sem, 0, IPC_RMID);
+
+	return 0;
+}
+
+/*
+ * Test sysctl with nested pid namespaces
+ * Make sure that the sysctl nesting semantics work correctly.
+ */
+static void test_sysctl_nested(void)
+{
+	int pid = spawn_thread(CLONE_NEWPID, sysctl_nested_child, NULL);
+
+	join_thread(pid);
 }
 
 /*
@@ -1334,7 +1668,7 @@ static void test_share_open(char *banner, char *b_suffix)
 
 /*
  * Test sharing via fork()
- * Test whether seal-modifications work as expected with forked childs.
+ * Test whether seal-modifications work as expected with forked children.
  */
 static void test_share_fork(char *banner, char *b_suffix)
 {
@@ -1361,6 +1695,11 @@ static void test_share_fork(char *banner, char *b_suffix)
 	mfd_assert_has_seals(fd, F_SEAL_SEAL);
 
 	close(fd);
+}
+
+static bool pid_ns_supported(void)
+{
+	return access("/proc/self/ns/pid", F_OK) == 0;
 }
 
 int main(int argc, char **argv)
@@ -1393,9 +1732,17 @@ int main(int argc, char **argv)
 
 	test_seal_write();
 	test_seal_future_write();
+	test_seal_write_map_read_shared();
 	test_seal_shrink();
 	test_seal_grow();
 	test_seal_resize();
+
+	if (pid_ns_supported()) {
+		test_sysctl_simple();
+		test_sysctl_nested();
+	} else {
+		printf("PID namespaces are not supported; skipping sysctl tests\n");
+	}
 
 	test_share_dup("SHARE-DUP", "");
 	test_share_mmap("SHARE-MMAP", "");
@@ -1410,8 +1757,6 @@ int main(int argc, char **argv)
 	test_share_open("SHARE-OPEN", SHARED_FT_STR);
 	test_share_fork("SHARE-FORK", SHARED_FT_STR);
 	join_idle_thread(pid);
-
-	test_sysctl();
 
 	printf("memfd: DONE\n");
 

@@ -41,7 +41,7 @@
 
 #define ZFCP_BUS_ID_SIZE	20
 
-MODULE_AUTHOR("IBM Deutschland Entwicklung GmbH - linux390@de.ibm.com");
+MODULE_AUTHOR("IBM Corporation");
 MODULE_DESCRIPTION("FCP HBA driver");
 MODULE_LICENSE("GPL");
 
@@ -254,6 +254,7 @@ static int zfcp_allocate_low_mem_buffers(struct zfcp_adapter *adapter)
 static void zfcp_free_low_mem_buffers(struct zfcp_adapter *adapter)
 {
 	mempool_destroy(adapter->pool.erp_req);
+	mempool_destroy(adapter->pool.gid_pn_req);
 	mempool_destroy(adapter->pool.scsi_req);
 	mempool_destroy(adapter->pool.scsi_abort);
 	mempool_destroy(adapter->pool.qtcb_pool);
@@ -312,15 +313,13 @@ static void zfcp_print_sl(struct seq_file *m, struct service_level *sl)
 
 static int zfcp_setup_adapter_work_queue(struct zfcp_adapter *adapter)
 {
-	char name[TASK_COMM_LEN];
+	adapter->work_queue =
+		alloc_ordered_workqueue("zfcp_q_%s", WQ_MEM_RECLAIM,
+					dev_name(&adapter->ccw_device->dev));
+	if (!adapter->work_queue)
+		return -ENOMEM;
 
-	snprintf(name, sizeof(name), "zfcp_q_%s",
-		 dev_name(&adapter->ccw_device->dev));
-	adapter->work_queue = alloc_ordered_workqueue(name, WQ_MEM_RECLAIM);
-
-	if (adapter->work_queue)
-		return 0;
-	return -ENOMEM;
+	return 0;
 }
 
 static void zfcp_destroy_adapter_work_queue(struct zfcp_adapter *adapter)
@@ -518,12 +517,12 @@ struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *adapter, u64 wwpn,
 	if (port) {
 		put_device(&port->dev);
 		retval = -EEXIST;
-		goto err_out;
+		goto err_put;
 	}
 
 	port = kzalloc(sizeof(struct zfcp_port), GFP_KERNEL);
 	if (!port)
-		goto err_out;
+		goto err_put;
 
 	rwlock_init(&port->unit_list_lock);
 	INIT_LIST_HEAD(&port->unit_list);
@@ -546,7 +545,7 @@ struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *adapter, u64 wwpn,
 
 	if (dev_set_name(&port->dev, "0x%016llx", (unsigned long long)wwpn)) {
 		kfree(port);
-		goto err_out;
+		goto err_put;
 	}
 	retval = -EINVAL;
 
@@ -563,7 +562,8 @@ struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *adapter, u64 wwpn,
 
 	return port;
 
-err_out:
+err_put:
 	zfcp_ccw_adapter_put(adapter);
+err_out:
 	return ERR_PTR(retval);
 }

@@ -19,7 +19,6 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/sched.h>
@@ -249,7 +248,7 @@ struct pxp_ctx {
 
 static inline struct pxp_ctx *file2ctx(struct file *file)
 {
-	return container_of(file->private_data, struct pxp_ctx, fh);
+	return container_of(file_to_v4l2_fh(file), struct pxp_ctx, fh);
 }
 
 static struct pxp_q_data *get_q_data(struct pxp_ctx *ctx,
@@ -1607,8 +1606,6 @@ static const struct vb2_ops pxp_qops = {
 	.buf_queue	 = pxp_buf_queue,
 	.start_streaming = pxp_start_streaming,
 	.stop_streaming  = pxp_stop_streaming,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 };
 
 static int queue_init(void *priv, struct vb2_queue *src_vq,
@@ -1663,7 +1660,6 @@ static int pxp_open(struct file *file)
 	}
 
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
-	file->private_data = &ctx->fh;
 	ctx->dev = dev;
 	hdl = &ctx->hdl;
 	v4l2_ctrl_handler_init(hdl, 4);
@@ -1702,7 +1698,7 @@ static int pxp_open(struct file *file)
 		goto open_unlock;
 	}
 
-	v4l2_fh_add(&ctx->fh);
+	v4l2_fh_add(&ctx->fh, file);
 	atomic_inc(&dev->num_inst);
 
 	dprintk(dev, "Created instance: %p, m2m_ctx: %p\n",
@@ -1720,7 +1716,7 @@ static int pxp_release(struct file *file)
 
 	dprintk(dev, "Releasing instance %p\n", ctx);
 
-	v4l2_fh_del(&ctx->fh);
+	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
 	v4l2_ctrl_handler_free(&ctx->hdl);
 	mutex_lock(&dev->dev_mutex);
@@ -1806,6 +1802,9 @@ static int pxp_probe(struct platform_device *pdev)
 		return PTR_ERR(mmio);
 	dev->regmap = devm_regmap_init_mmio(&pdev->dev, mmio,
 					    &pxp_regmap_config);
+	if (IS_ERR(dev->regmap))
+		return dev_err_probe(&pdev->dev, PTR_ERR(dev->regmap),
+				     "Failed to init regmap\n");
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -1904,7 +1903,7 @@ err_clk:
 	return ret;
 }
 
-static int pxp_remove(struct platform_device *pdev)
+static void pxp_remove(struct platform_device *pdev)
 {
 	struct pxp_dev *dev = platform_get_drvdata(pdev);
 
@@ -1922,8 +1921,6 @@ static int pxp_remove(struct platform_device *pdev)
 	video_unregister_device(&dev->vfd);
 	v4l2_m2m_release(dev->m2m_dev);
 	v4l2_device_unregister(&dev->v4l2_dev);
-
-	return 0;
 }
 
 static const struct pxp_pdata pxp_imx6ull_pdata = {

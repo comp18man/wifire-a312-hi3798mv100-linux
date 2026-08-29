@@ -9,6 +9,7 @@
 #include <linux/buffer_head.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/nls.h>
 
 #include "debug.h"
 #include "ntfs.h"
@@ -172,13 +173,13 @@ int ntfs_fix_post_read(struct NTFS_RECORD_HEADER *rhdr, size_t bytes,
 	u16 sample, fo, fn;
 
 	fo = le16_to_cpu(rhdr->fix_off);
-	fn = simple ? ((bytes >> SECTOR_SHIFT) + 1)
-		    : le16_to_cpu(rhdr->fix_num);
+	fn = simple ? ((bytes >> SECTOR_SHIFT) + 1) :
+		      le16_to_cpu(rhdr->fix_num);
 
 	/* Check errors. */
 	if ((fo & 1) || fo + fn * sizeof(short) > SECTOR_SIZE || !fn-- ||
 	    fn * SECTOR_SIZE > bytes) {
-		return -EINVAL; /* Native chkntfs returns ok! */
+		return -E_NTFS_CORRUPT;
 	}
 
 	/* Get fixup pointer. */
@@ -223,7 +224,7 @@ int ntfs_extend_init(struct ntfs_sb_info *sbi)
 	inode = ntfs_iget5(sb, &ref, &NAME_EXTEND);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load $Extend.");
+		ntfs_err(sb, "Failed to load $Extend (%d).", err);
 		inode = NULL;
 		goto out;
 	}
@@ -282,7 +283,7 @@ int ntfs_loadlog_and_replay(struct ntfs_inode *ni, struct ntfs_sb_info *sbi)
 
 	/* Check for 4GB. */
 	if (ni->vfs_inode.i_size >= 0x100000000ull) {
-		ntfs_err(sb, "\x24LogFile is too big");
+		ntfs_err(sb, "\x24LogFile is large than 4G.");
 		err = -EINVAL;
 		goto out;
 	}
@@ -521,7 +522,7 @@ static int ntfs_extend_mft(struct ntfs_sb_info *sbi)
 	ni->mi.dirty = true;
 
 	/* Step 2: Resize $MFT::BITMAP. */
-	new_bitmap_bytes = bitmap_size(new_mft_total);
+	new_bitmap_bytes = ntfs3_bitmap_size(new_mft_total);
 
 	err = attr_set_size(ni, ATTR_BITMAP, NULL, 0, &sbi->mft.bitmap.run,
 			    new_bitmap_bytes, &new_bitmap_bytes, true, NULL);
@@ -646,13 +647,13 @@ next:
 						 NULL, 0, NULL, NULL))
 					goto next;
 
-				__clear_bit_le(ir - MFT_REC_RESERVED,
+				__clear_bit(ir - MFT_REC_RESERVED,
 					    &sbi->mft.reserved_bitmap);
 			}
 		}
 
 		/* Scan 5 bits for zero. Bit 0 == MFT_REC_RESERVED */
-		zbit = find_next_zero_bit_le(&sbi->mft.reserved_bitmap,
+		zbit = find_next_zero_bit(&sbi->mft.reserved_bitmap,
 					  MFT_REC_FREE, MFT_REC_RESERVED);
 		if (zbit >= MFT_REC_FREE) {
 			sbi->mft.next_reserved = MFT_REC_FREE;
@@ -720,7 +721,7 @@ found:
 	if (*rno >= MFT_REC_FREE)
 		wnd_set_used(wnd, *rno, 1);
 	else if (*rno >= MFT_REC_RESERVED && sbi->mft.reserved_bitmap_inited)
-		__set_bit_le(*rno - MFT_REC_RESERVED, &sbi->mft.reserved_bitmap);
+		__set_bit(*rno - MFT_REC_RESERVED, &sbi->mft.reserved_bitmap);
 
 out:
 	if (!mft)
@@ -748,7 +749,7 @@ void ntfs_mark_rec_free(struct ntfs_sb_info *sbi, CLST rno, bool is_mft)
 		else
 			wnd_set_free(wnd, rno, 1);
 	} else if (rno >= MFT_REC_RESERVED && sbi->mft.reserved_bitmap_inited) {
-		__clear_bit_le(rno - MFT_REC_RESERVED, &sbi->mft.reserved_bitmap);
+		__clear_bit(rno - MFT_REC_RESERVED, &sbi->mft.reserved_bitmap);
 	}
 
 	if (rno < wnd_zone_bit(wnd))
@@ -846,18 +847,17 @@ void ntfs_update_mftmirr(struct ntfs_sb_info *sbi, int wait)
 {
 	int err;
 	struct super_block *sb = sbi->sb;
-	u32 blocksize;
+	u32 blocksize, bytes;
 	sector_t block1, block2;
-	u32 bytes;
 
-	if (!sb)
+	/*
+	 * sb can be NULL here. In this case sbi->flags should be 0 too.
+	 */
+	if (!sb || !(sbi->flags & NTFS_FLAGS_MFTMIRR) ||
+	    unlikely(ntfs3_forced_shutdown(sb)))
 		return;
 
 	blocksize = sb->s_blocksize;
-
-	if (!(sbi->flags & NTFS_FLAGS_MFTMIRR))
-		return;
-
 	bytes = sbi->mft.recs_mirr << sbi->record_bits;
 	block1 = sbi->mft.lbo >> sb->s_blocksize_bits;
 	block2 = sbi->mft.lbo2 >> sb->s_blocksize_bits;
@@ -905,10 +905,18 @@ void ntfs_update_mftmirr(struct ntfs_sb_info *sbi, int wait)
 void ntfs_bad_inode(struct inode *inode, const char *hint)
 {
 	struct ntfs_sb_info *sbi = inode->i_sb->s_fs_info;
+	struct ntfs_inode *ni = ntfs_i(inode);
 
 	ntfs_inode_err(inode, "%s", hint);
-	make_bad_inode(inode);
-	ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
+
+	/* Do not call make_bad_inode()! */
+	ni->ni_bad = true;
+
+	/* Avoid recursion if bad inode is $Volume. */
+	if (inode->i_ino != MFT_REC_VOL &&
+	    !(sbi->flags & NTFS_FLAGS_LOG_REPLAYING)) {
+		ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
+	}
 }
 
 /*
@@ -925,6 +933,7 @@ int ntfs_set_state(struct ntfs_sb_info *sbi, enum NTFS_DIRTY_FLAGS dirty)
 	struct VOLUME_INFO *info;
 	struct mft_inode *mi;
 	struct ntfs_inode *ni;
+	__le16 info_flags;
 
 	/*
 	 * Do not change state if fs was real_dirty.
@@ -957,6 +966,8 @@ int ntfs_set_state(struct ntfs_sb_info *sbi, enum NTFS_DIRTY_FLAGS dirty)
 		goto out;
 	}
 
+	info_flags = info->flags;
+
 	switch (dirty) {
 	case NTFS_DIRTY_ERROR:
 		ntfs_notice(sbi->sb, "Mark volume as dirty due to NTFS errors");
@@ -970,8 +981,10 @@ int ntfs_set_state(struct ntfs_sb_info *sbi, enum NTFS_DIRTY_FLAGS dirty)
 		break;
 	}
 	/* Cache current volume flags. */
-	sbi->volume.flags = info->flags;
-	mi->dirty = true;
+	if (info_flags != info->flags) {
+		sbi->volume.flags = info->flags;
+		mi->dirty = true;
+	}
 	err = 0;
 
 out:
@@ -979,18 +992,11 @@ out:
 	if (err)
 		return err;
 
-	mark_inode_dirty(&ni->vfs_inode);
+	mark_inode_dirty_sync(&ni->vfs_inode);
 	/* verify(!ntfs_update_mftmirr()); */
 
-	/*
-	 * If we used wait=1, sync_inode_metadata waits for the io for the
-	 * inode to finish. It hangs when media is removed.
-	 * So wait=0 is sent down to sync_inode_metadata
-	 * and filemap_fdatawrite is used for the data blocks.
-	 */
-	err = sync_inode_metadata(&ni->vfs_inode, 0);
-	if (!err)
-		err = filemap_fdatawrite(ni->vfs_inode.i_mapping);
+	/* write mft record on disk. */
+	err = _ni_write_inode(&ni->vfs_inode, 1);
 
 	return err;
 }
@@ -1009,32 +1015,28 @@ static inline __le32 security_hash(const void *sd, size_t bytes)
 	return cpu_to_le32(hash);
 }
 
-int ntfs_sb_read(struct super_block *sb, u64 lbo, size_t bytes, void *buffer)
+/*
+ * simple wrapper for sb_bread_unmovable.
+ */
+struct buffer_head *ntfs_bread(struct super_block *sb, sector_t block)
 {
-	struct block_device *bdev = sb->s_bdev;
-	u32 blocksize = sb->s_blocksize;
-	u64 block = lbo >> sb->s_blocksize_bits;
-	u32 off = lbo & (blocksize - 1);
-	u32 op = blocksize - off;
+	struct ntfs_sb_info *sbi = sb->s_fs_info;
+	struct buffer_head *bh;
 
-	for (; bytes; block += 1, off = 0, op = blocksize) {
-		struct buffer_head *bh = __bread(bdev, block, blocksize);
-
-		if (!bh)
-			return -EIO;
-
-		if (op > bytes)
-			op = bytes;
-
-		memcpy(buffer, bh->b_data + off, op);
-
-		put_bh(bh);
-
-		bytes -= op;
-		buffer = Add2Ptr(buffer, op);
+	if (unlikely(block >= sbi->volume.blocks)) {
+		/* prevent generic message "attempt to access beyond end of device" */
+		ntfs_err(sb, "try to read out of volume at offset 0x%llx",
+			 (u64)block << sb->s_blocksize_bits);
+		return NULL;
 	}
 
-	return 0;
+	bh = sb_bread_unmovable(sb, block);
+	if (bh)
+		return bh;
+
+	ntfs_err(sb, "failed to read volume at offset 0x%llx",
+		 (u64)block << sb->s_blocksize_bits);
+	return NULL;
 }
 
 int ntfs_sb_write(struct super_block *sb, u64 lbo, size_t bytes,
@@ -1250,6 +1252,12 @@ int ntfs_read_run_nb(struct ntfs_sb_info *sbi, const struct runs_tree *run,
 
 		} while (len32);
 
+		if (!run) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		/* Get next fragment to read. */
 		vcn_next = vcn + clen;
 		if (!run_get_entry(run, ++idx, &vcn, &lcn, &clen) ||
 		    vcn != vcn_next) {
@@ -1347,7 +1355,14 @@ int ntfs_get_bh(struct ntfs_sb_info *sbi, const struct runs_tree *run, u64 vbo,
 				}
 				if (buffer_locked(bh))
 					__wait_on_buffer(bh);
-				set_buffer_uptodate(bh);
+
+				lock_buffer(bh);
+				if (!buffer_uptodate(bh))
+				{
+					memset(bh->b_data, 0, blocksize);
+					set_buffer_uptodate(bh);
+				}
+				unlock_buffer(bh);
 			} else {
 				bh = ntfs_bread(sb, block);
 				if (!bh) {
@@ -1658,7 +1673,8 @@ int ntfs_vbo_to_lbo(struct ntfs_sb_info *sbi, const struct runs_tree *run,
 	return 0;
 }
 
-struct ntfs_inode *ntfs_new_inode(struct ntfs_sb_info *sbi, CLST rno, bool dir)
+struct ntfs_inode *ntfs_new_inode(struct ntfs_sb_info *sbi, CLST rno,
+				  enum RECORD_FLAG flag)
 {
 	int err = 0;
 	struct super_block *sb = sbi->sb;
@@ -1670,8 +1686,7 @@ struct ntfs_inode *ntfs_new_inode(struct ntfs_sb_info *sbi, CLST rno, bool dir)
 
 	ni = ntfs_i(inode);
 
-	err = mi_format_new(&ni->mi, sbi, rno, dir ? RECORD_FLAG_DIR : 0,
-			    false);
+	err = mi_format_new(&ni->mi, sbi, rno, flag, false);
 	if (err)
 		goto out;
 
@@ -1683,6 +1698,7 @@ struct ntfs_inode *ntfs_new_inode(struct ntfs_sb_info *sbi, CLST rno, bool dir)
 
 out:
 	if (err) {
+		make_bad_inode(inode);
 		iput(inode);
 		ni = ERR_PTR(err);
 	}
@@ -1859,7 +1875,7 @@ int ntfs_security_init(struct ntfs_sb_info *sbi)
 	inode = ntfs_iget5(sb, &ref, &NAME_SECURE);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load $Secure.");
+		ntfs_err(sb, "Failed to load $Secure (%d).", err);
 		inode = NULL;
 		goto out;
 	}
@@ -1870,41 +1886,43 @@ int ntfs_security_init(struct ntfs_sb_info *sbi)
 
 	attr = ni_find_attr(ni, NULL, &le, ATTR_ROOT, SDH_NAME,
 			    ARRAY_SIZE(SDH_NAME), NULL, NULL);
-	if (!attr) {
-		err = -EINVAL;
-		goto out;
-	}
-
-	root_sdh = resident_data_ex(attr, sizeof(struct INDEX_ROOT));
-	if (root_sdh->type != ATTR_ZERO ||
+	if (!attr ||
+	    !(root_sdh = resident_data_ex(attr, sizeof(struct INDEX_ROOT))) ||
+	    root_sdh->type != ATTR_ZERO ||
 	    root_sdh->rule != NTFS_COLLATION_TYPE_SECURITY_HASH ||
-	    offsetof(struct INDEX_ROOT, ihdr) + root_sdh->ihdr.used > attr->res.data_size) {
+	    offsetof(struct INDEX_ROOT, ihdr) +
+			    le32_to_cpu(root_sdh->ihdr.used) >
+		    le32_to_cpu(attr->res.data_size)) {
+		ntfs_err(sb, "$Secure::$SDH is corrupted.");
 		err = -EINVAL;
 		goto out;
 	}
 
 	err = indx_init(indx_sdh, sbi, attr, INDEX_MUTEX_SDH);
-	if (err)
-		goto out;
-
-	attr = ni_find_attr(ni, attr, &le, ATTR_ROOT, SII_NAME,
-			    ARRAY_SIZE(SII_NAME), NULL, NULL);
-	if (!attr) {
-		err = -EINVAL;
+	if (err) {
+		ntfs_err(sb, "Failed to initialize $Secure::$SDH (%d).", err);
 		goto out;
 	}
 
-	root_sii = resident_data_ex(attr, sizeof(struct INDEX_ROOT));
-	if (root_sii->type != ATTR_ZERO ||
+	attr = ni_find_attr(ni, attr, &le, ATTR_ROOT, SII_NAME,
+			    ARRAY_SIZE(SII_NAME), NULL, NULL);
+	if (!attr ||
+	    !(root_sii = resident_data_ex(attr, sizeof(struct INDEX_ROOT))) ||
+	    root_sii->type != ATTR_ZERO ||
 	    root_sii->rule != NTFS_COLLATION_TYPE_UINT ||
-	    offsetof(struct INDEX_ROOT, ihdr) + root_sii->ihdr.used > attr->res.data_size) {
+	    offsetof(struct INDEX_ROOT, ihdr) +
+			    le32_to_cpu(root_sii->ihdr.used) >
+		    le32_to_cpu(attr->res.data_size)) {
+		ntfs_err(sb, "$Secure::$SII is corrupted.");
 		err = -EINVAL;
 		goto out;
 	}
 
 	err = indx_init(indx_sii, sbi, attr, INDEX_MUTEX_SII);
-	if (err)
+	if (err) {
+		ntfs_err(sb, "Failed to initialize $Secure::$SII (%d).", err);
 		goto out;
+	}
 
 	fnd_sii = fnd_get();
 	if (!fnd_sii) {
@@ -1931,7 +1949,7 @@ int ntfs_security_init(struct ntfs_sb_info *sbi)
 			break;
 
 		sii_e = (struct NTFS_DE_SII *)ne;
-		if (le16_to_cpu(ne->view.data_size) < SIZEOF_SECURITY_HDR)
+		if (le16_to_cpu(ne->view.data_size) < sizeof(sii_e->sec_hdr))
 			continue;
 
 		next_id = le32_to_cpu(sii_e->sec_id) + 1;
@@ -1992,18 +2010,18 @@ int ntfs_get_security_by_id(struct ntfs_sb_info *sbi, __le32 security_id,
 		goto out;
 
 	t32 = le32_to_cpu(sii_e->sec_hdr.size);
-	if (t32 < SIZEOF_SECURITY_HDR) {
+	if (t32 < sizeof(struct SECURITY_HDR)) {
 		err = -EINVAL;
 		goto out;
 	}
 
-	if (t32 > SIZEOF_SECURITY_HDR + 0x10000) {
+	if (t32 > sizeof(struct SECURITY_HDR) + 0x10000) {
 		/* Looks like too big security. 0x10000 - is arbitrary big number. */
 		err = -EFBIG;
 		goto out;
 	}
 
-	*size = t32 - SIZEOF_SECURITY_HDR;
+	*size = t32 - sizeof(struct SECURITY_HDR);
 
 	p = kmalloc(*size, GFP_NOFS);
 	if (!p) {
@@ -2017,14 +2035,14 @@ int ntfs_get_security_by_id(struct ntfs_sb_info *sbi, __le32 security_id,
 	if (err)
 		goto out;
 
-	if (memcmp(&d_security, &sii_e->sec_hdr, SIZEOF_SECURITY_HDR)) {
+	if (memcmp(&d_security, &sii_e->sec_hdr, sizeof(d_security))) {
 		err = -EINVAL;
 		goto out;
 	}
 
 	err = ntfs_read_run_nb(sbi, &ni->file.run,
 			       le64_to_cpu(sii_e->sec_hdr.off) +
-				       SIZEOF_SECURITY_HDR,
+				       sizeof(struct SECURITY_HDR),
 			       p, *size, NULL);
 	if (err)
 		goto out;
@@ -2063,7 +2081,7 @@ int ntfs_insert_security(struct ntfs_sb_info *sbi,
 	struct NTFS_DE_SDH sdh_e;
 	struct NTFS_DE_SII sii_e;
 	struct SECURITY_HDR *d_security;
-	u32 new_sec_size = size_sd + SIZEOF_SECURITY_HDR;
+	u32 new_sec_size = size_sd + sizeof(struct SECURITY_HDR);
 	u32 aligned_sec_size = ALIGN(new_sec_size, 16);
 	struct SECURITY_KEY hash_key;
 	struct ntfs_fnd *fnd_sdh = NULL;
@@ -2128,8 +2146,8 @@ int ntfs_insert_security(struct ntfs_sb_info *sbi,
 			if (le32_to_cpu(d_security->size) == new_sec_size &&
 			    d_security->key.hash == hash_key.hash &&
 			    !memcmp(d_security + 1, sd, size_sd)) {
-				*security_id = d_security->key.sec_id;
 				/* Such security already exists. */
+				*security_id = d_security->key.sec_id;
 				err = 0;
 				goto out;
 			}
@@ -2201,14 +2219,14 @@ int ntfs_insert_security(struct ntfs_sb_info *sbi,
 	/* Fill SII entry. */
 	sii_e.de.view.data_off =
 		cpu_to_le16(offsetof(struct NTFS_DE_SII, sec_hdr));
-	sii_e.de.view.data_size = cpu_to_le16(SIZEOF_SECURITY_HDR);
+	sii_e.de.view.data_size = cpu_to_le16(sizeof(struct SECURITY_HDR));
 	sii_e.de.view.res = 0;
-	sii_e.de.size = cpu_to_le16(SIZEOF_SII_DIRENTRY);
+	sii_e.de.size = cpu_to_le16(sizeof(struct NTFS_DE_SII));
 	sii_e.de.key_size = cpu_to_le16(sizeof(d_security->key.sec_id));
 	sii_e.de.flags = 0;
 	sii_e.de.res = 0;
 	sii_e.sec_id = d_security->key.sec_id;
-	memcpy(&sii_e.sec_hdr, d_security, SIZEOF_SECURITY_HDR);
+	memcpy(&sii_e.sec_hdr, d_security, sizeof(struct SECURITY_HDR));
 
 	err = indx_insert_entry(indx_sii, ni, &sii_e.de, NULL, NULL, 0);
 	if (err)
@@ -2217,7 +2235,7 @@ int ntfs_insert_security(struct ntfs_sb_info *sbi,
 	/* Fill SDH entry. */
 	sdh_e.de.view.data_off =
 		cpu_to_le16(offsetof(struct NTFS_DE_SDH, sec_hdr));
-	sdh_e.de.view.data_size = cpu_to_le16(SIZEOF_SECURITY_HDR);
+	sdh_e.de.view.data_size = cpu_to_le16(sizeof(struct SECURITY_HDR));
 	sdh_e.de.view.res = 0;
 	sdh_e.de.size = cpu_to_le16(SIZEOF_SDH_DIRENTRY);
 	sdh_e.de.key_size = cpu_to_le16(sizeof(sdh_e.key));
@@ -2225,7 +2243,7 @@ int ntfs_insert_security(struct ntfs_sb_info *sbi,
 	sdh_e.de.res = 0;
 	sdh_e.key.hash = d_security->key.hash;
 	sdh_e.key.sec_id = d_security->key.sec_id;
-	memcpy(&sdh_e.sec_hdr, d_security, SIZEOF_SECURITY_HDR);
+	memcpy(&sdh_e.sec_hdr, d_security, sizeof(struct SECURITY_HDR));
 	sdh_e.magic[0] = cpu_to_le16('I');
 	sdh_e.magic[1] = cpu_to_le16('I');
 
@@ -2454,10 +2472,12 @@ void mark_as_free_ex(struct ntfs_sb_info *sbi, CLST lcn, CLST len, bool trim)
 {
 	CLST end, i, zone_len, zlen;
 	struct wnd_bitmap *wnd = &sbi->used.bitmap;
+	bool dirty = false;
 
 	down_write_nested(&wnd->rw_lock, BITMAP_MUTEX_CLUSTERS);
 	if (!wnd_is_used(wnd, lcn, len)) {
-		ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
+		/* mark volume as dirty out of wnd->rw_lock */
+		dirty = true;
 
 		end = lcn + len;
 		len = 0;
@@ -2511,12 +2531,15 @@ void mark_as_free_ex(struct ntfs_sb_info *sbi, CLST lcn, CLST len, bool trim)
 
 out:
 	up_write(&wnd->rw_lock);
+	if (dirty)
+		ntfs_set_state(sbi, NTFS_DIRTY_ERROR);
 }
 
 /*
  * run_deallocate - Deallocate clusters.
  */
-int run_deallocate(struct ntfs_sb_info *sbi, struct runs_tree *run, bool trim)
+int run_deallocate(struct ntfs_sb_info *sbi, const struct runs_tree *run,
+		   bool trim)
 {
 	CLST lcn, len;
 	size_t idx = 0;
@@ -2572,13 +2595,13 @@ static inline bool name_has_forbidden_chars(const struct le_str *fname)
 	return false;
 }
 
-static inline bool is_reserved_name(struct ntfs_sb_info *sbi,
+static inline bool is_reserved_name(const struct ntfs_sb_info *sbi,
 				    const struct le_str *fname)
 {
 	int port_digit;
 	const __le16 *name = fname->name;
 	int len = fname->len;
-	u16 *upcase = sbi->upcase;
+	const u16 *upcase = sbi->upcase;
 
 	/* check for 3 chars reserved names (device names) */
 	/* name by itself or with any extension is forbidden */
@@ -2594,8 +2617,10 @@ static inline bool is_reserved_name(struct ntfs_sb_info *sbi,
 	if (len == 4 || (len > 4 && le16_to_cpu(name[4]) == '.')) {
 		port_digit = le16_to_cpu(name[3]);
 		if (port_digit >= '1' && port_digit <= '9')
-			if (!ntfs_cmp_names(name, 3, COM_NAME, 3, upcase, false) ||
-			    !ntfs_cmp_names(name, 3, LPT_NAME, 3, upcase, false))
+			if (!ntfs_cmp_names(name, 3, COM_NAME, 3, upcase,
+					    false) ||
+			    !ntfs_cmp_names(name, 3, LPT_NAME, 3, upcase,
+					    false))
 				return true;
 	}
 
@@ -2609,4 +2634,62 @@ bool valid_windows_name(struct ntfs_sb_info *sbi, const struct le_str *fname)
 {
 	return !name_has_forbidden_chars(fname) &&
 	       !is_reserved_name(sbi, fname);
+}
+
+/*
+ * ntfs_set_label - updates current ntfs label.
+ */
+int ntfs_set_label(struct ntfs_sb_info *sbi, u8 *label, int len)
+{
+	int err;
+	struct ATTRIB *attr;
+	u32 uni_bytes;
+	struct ntfs_inode *ni = sbi->volume.ni;
+	/* Allocate PATH_MAX bytes. */
+	struct cpu_str *uni = kmalloc(PATH_MAX, GFP_KERNEL);
+
+	if (!uni)
+		return -ENOMEM;
+
+	err = ntfs_nls_to_utf16(sbi, label, len, uni, (PATH_MAX - 2) / 2,
+				UTF16_LITTLE_ENDIAN);
+	if (err < 0)
+		goto out;
+
+	uni_bytes = uni->len * sizeof(u16);
+	if (uni_bytes > NTFS_LABEL_MAX_LENGTH * sizeof(u16)) {
+		ntfs_warn(sbi->sb, "new label is too long");
+		err = -EFBIG;
+		goto out;
+	}
+
+	ni_lock(ni);
+
+	/* Ignore any errors. */
+	ni_remove_attr(ni, ATTR_LABEL, NULL, 0, false, NULL);
+
+	err = ni_insert_resident(ni, uni_bytes, ATTR_LABEL, NULL, 0, &attr,
+				 NULL, NULL);
+	if (err < 0)
+		goto unlock_out;
+
+	/* write new label in on-disk struct. */
+	memcpy(resident_data(attr), uni->name, uni_bytes);
+
+	/* update cached value of current label. */
+	if (len >= ARRAY_SIZE(sbi->volume.label))
+		len = ARRAY_SIZE(sbi->volume.label) - 1;
+	memcpy(sbi->volume.label, label, len);
+	sbi->volume.label[len] = 0;
+	mark_inode_dirty_sync(&ni->vfs_inode);
+
+unlock_out:
+	ni_unlock(ni);
+
+	if (!err)
+		err = _ni_write_inode(&ni->vfs_inode, 0);
+
+out:
+	kfree(uni);
+	return err;
 }

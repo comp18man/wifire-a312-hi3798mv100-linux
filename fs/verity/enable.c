@@ -7,31 +7,35 @@
 
 #include "fsverity_private.h"
 
+#include <linux/export.h>
 #include <linux/mount.h>
 #include <linux/sched/signal.h>
 #include <linux/uaccess.h>
 
 struct block_buffer {
 	u32 filled;
+	bool is_root_hash;
 	u8 *data;
 };
 
 /* Hash a block, writing the result to the next level's pending block buffer. */
-static int hash_one_block(struct inode *inode,
-			  const struct merkle_tree_params *params,
-			  struct ahash_request *req, struct block_buffer *cur)
+static int hash_one_block(const struct merkle_tree_params *params,
+			  struct block_buffer *cur)
 {
 	struct block_buffer *next = cur + 1;
-	int err;
+
+	/*
+	 * Safety check to prevent a buffer overflow in case of a filesystem bug
+	 * that allows the file size to change despite deny_write_access(), or a
+	 * bug in the Merkle tree logic itself
+	 */
+	if (WARN_ON_ONCE(next->is_root_hash && next->filled != 0))
+		return -EINVAL;
 
 	/* Zero-pad the block if it's shorter than the block size. */
 	memset(&cur->data[cur->filled], 0, params->block_size - cur->filled);
 
-	err = fsverity_hash_block(params, inode, req, virt_to_page(cur->data),
-				  offset_in_page(cur->data),
-				  &next->data[next->filled]);
-	if (err)
-		return err;
+	fsverity_hash_block(params, cur->data, &next->data[next->filled]);
 	next->filled += params->digest_size;
 	cur->filled = 0;
 	return 0;
@@ -67,7 +71,6 @@ static int build_merkle_tree(struct file *filp,
 	struct inode *inode = file_inode(filp);
 	const u64 data_size = inode->i_size;
 	const int num_levels = params->num_levels;
-	struct ahash_request *req;
 	struct block_buffer _buffers[1 + FS_VERITY_MAX_LEVELS + 1] = {};
 	struct block_buffer *buffers = &_buffers[1];
 	unsigned long level_offset[FS_VERITY_MAX_LEVELS];
@@ -80,9 +83,6 @@ static int build_merkle_tree(struct file *filp,
 		memset(root_hash, 0, params->digest_size);
 		return 0;
 	}
-
-	/* This allocation never fails, since it's mempool-backed. */
-	req = fsverity_alloc_hash_request(params->hash_alg, GFP_KERNEL);
 
 	/*
 	 * Allocate the block buffers.  Buffer "-1" is for data blocks.
@@ -97,6 +97,7 @@ static int build_merkle_tree(struct file *filp,
 		}
 	}
 	buffers[num_levels].data = root_hash;
+	buffers[num_levels].is_root_hash = true;
 
 	BUILD_BUG_ON(sizeof(level_offset) != sizeof(params->level_start));
 	memcpy(level_offset, params->level_start, sizeof(level_offset));
@@ -120,7 +121,7 @@ static int build_merkle_tree(struct file *filp,
 			fsverity_err(inode, "Short read of file data");
 			goto out;
 		}
-		err = hash_one_block(inode, params, req, &buffers[-1]);
+		err = hash_one_block(params, &buffers[-1]);
 		if (err)
 			goto out;
 		for (level = 0; level < num_levels; level++) {
@@ -131,8 +132,7 @@ static int build_merkle_tree(struct file *filp,
 			}
 			/* Next block at @level is full */
 
-			err = hash_one_block(inode, params, req,
-					     &buffers[level]);
+			err = hash_one_block(params, &buffers[level]);
 			if (err)
 				goto out;
 			err = write_merkle_tree_block(inode,
@@ -152,8 +152,7 @@ static int build_merkle_tree(struct file *filp,
 	/* Finish all nonempty pending tree blocks. */
 	for (level = 0; level < num_levels; level++) {
 		if (buffers[level].filled != 0) {
-			err = hash_one_block(inode, params, req,
-					     &buffers[level]);
+			err = hash_one_block(params, &buffers[level]);
 			if (err)
 				goto out;
 			err = write_merkle_tree_block(inode,
@@ -165,7 +164,7 @@ static int build_merkle_tree(struct file *filp,
 		}
 	}
 	/* The root hash was filled by the last call to hash_one_block(). */
-	if (WARN_ON(buffers[num_levels].filled != params->digest_size)) {
+	if (WARN_ON_ONCE(buffers[num_levels].filled != params->digest_size)) {
 		err = -EINVAL;
 		goto out;
 	}
@@ -173,7 +172,6 @@ static int build_merkle_tree(struct file *filp,
 out:
 	for (level = -1; level < num_levels; level++)
 		kfree(buffers[level].data);
-	fsverity_free_hash_request(params->hash_alg, req);
 	return err;
 }
 
@@ -205,7 +203,7 @@ static int enable_verity(struct file *filp,
 	}
 	desc->salt_size = arg->salt_size;
 
-	/* Get the signature if the user provided one */
+	/* Get the builtin signature if the user provided one */
 	if (arg->sig_size &&
 	    copy_from_user(desc->signature, u64_to_user_ptr(arg->sig_ptr),
 			   arg->sig_size)) {
@@ -277,16 +275,16 @@ static int enable_verity(struct file *filp,
 		fsverity_err(inode, "%ps() failed with err %d",
 			     vops->end_enable_verity, err);
 		fsverity_free_info(vi);
-	} else if (WARN_ON(!IS_VERITY(inode))) {
+	} else if (WARN_ON_ONCE(!IS_VERITY(inode))) {
 		err = -EINVAL;
 		fsverity_free_info(vi);
 	} else {
 		/* Successfully enabled verity */
 
 		/*
-		 * Readers can start using ->i_verity_info immediately, so it
-		 * can't be rolled back once set.  So don't set it until just
-		 * after the filesystem has successfully enabled verity.
+		 * Readers can start using the inode's verity info immediately,
+		 * so it can't be rolled back once set.  So don't set it until
+		 * just after the filesystem has successfully enabled verity.
 		 */
 		fsverity_set_info(inode, vi);
 	}
@@ -347,6 +345,13 @@ int fsverity_ioctl_enable(struct file *filp, const void __user *uarg)
 	err = file_permission(filp, MAY_WRITE);
 	if (err)
 		return err;
+	/*
+	 * __kernel_read() is used while building the Merkle tree.  So, we can't
+	 * allow file descriptors that were opened for ioctl access only, using
+	 * the special nonstandard access mode 3.  O_RDONLY only, please!
+	 */
+	if (!(filp->f_mode & FMODE_READ))
+		return -EBADF;
 
 	if (IS_APPEND(inode))
 		return -EPERM;

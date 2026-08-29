@@ -22,8 +22,9 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/io.h>
+#include <asm/machine.h>
 #include <asm/ebcdic.h>
-#include <asm/io.h>
 #include <asm/appldata.h>
 #include <asm/monwriter.h>
 
@@ -122,6 +123,9 @@ static int monwrite_new_hdr(struct mon_private *monpriv)
 			kfree(monbuf->data);
 			kfree(monbuf);
 			monbuf = NULL;
+		} else if (monbuf->hdr.datalen != monhdr->datalen) {
+			/* Data with buffer reuse must not change its length */
+			return -EINVAL;
 		}
 	} else if (monhdr->mon_function != MONWRITE_STOP_INTERVAL) {
 		if (mon_buf_count >= mon_max_bufs)
@@ -293,7 +297,7 @@ static struct miscdevice mon_dev = {
 
 static int __init mon_init(void)
 {
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return -ENODEV;
 	/*
 	 * misc_register() has to be the last action in module_init(), because

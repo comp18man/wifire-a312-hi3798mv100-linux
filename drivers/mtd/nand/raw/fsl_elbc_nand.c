@@ -869,7 +869,8 @@ static int fsl_elbc_nand_probe(struct platform_device *pdev)
 	struct mtd_info *mtd;
 
 	if (!fsl_lbc_ctrl_dev || !fsl_lbc_ctrl_dev->regs)
-		return -ENODEV;
+		return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "lbc_ctrl_dev missing\n");
+
 	lbc = fsl_lbc_ctrl_dev->regs;
 	dev = fsl_lbc_ctrl_dev->dev;
 
@@ -963,7 +964,7 @@ err:
 	return ret;
 }
 
-static int fsl_elbc_nand_remove(struct platform_device *pdev)
+static void fsl_elbc_nand_remove(struct platform_device *pdev)
 {
 	struct fsl_elbc_fcm_ctrl *elbc_fcm_ctrl = fsl_lbc_ctrl_dev->nand;
 	struct fsl_elbc_mtd *priv = dev_get_drvdata(&pdev->dev);
@@ -983,8 +984,6 @@ static int fsl_elbc_nand_remove(struct platform_device *pdev)
 		kfree(elbc_fcm_ctrl);
 	}
 	mutex_unlock(&fsl_elbc_nand_mutex);
-
-	return 0;
 
 }
 

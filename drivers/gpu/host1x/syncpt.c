@@ -248,7 +248,13 @@ int host1x_syncpt_wait(struct host1x_syncpt *sp, u32 thresh, long timeout,
 	if (value)
 		*value = host1x_syncpt_load(sp);
 
-	if (wait_err == 0)
+	/*
+	 * Don't rely on dma_fence_wait_timeout return value,
+	 * since it returns zero both on timeout and if the
+	 * wait completed with 0 jiffies left.
+	 */
+	host1x_hw_syncpt_load(sp->host, sp);
+	if (wait_err == 0 && !host1x_syncpt_is_expired(sp, thresh))
 		return -EAGAIN;
 	else if (wait_err < 0)
 		return wait_err;
@@ -339,8 +345,6 @@ static void syncpt_release(struct kref *ref)
 
 	sp->locked = false;
 
-	mutex_lock(&sp->host->syncpt_mutex);
-
 	host1x_syncpt_base_free(sp->base);
 	kfree(sp->name);
 	sp->base = NULL;
@@ -363,7 +367,7 @@ void host1x_syncpt_put(struct host1x_syncpt *sp)
 	if (!sp)
 		return;
 
-	kref_put(&sp->ref, syncpt_release);
+	kref_put_mutex(&sp->ref, syncpt_release, &sp->host->syncpt_mutex);
 }
 EXPORT_SYMBOL(host1x_syncpt_put);
 

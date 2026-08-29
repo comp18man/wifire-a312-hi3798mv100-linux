@@ -2,7 +2,6 @@
 #include <linux/platform_device.h>
 #include <linux/memregion.h>
 #include <linux/module.h>
-#include <linux/pfn_t.h>
 #include <linux/dax.h>
 #include "../bus.h"
 
@@ -16,7 +15,6 @@ static int dax_hmem_probe(struct platform_device *pdev)
 	struct dax_region *dax_region;
 	struct memregion_info *mri;
 	struct dev_dax_data data;
-	struct dev_dax *dev_dax;
 
 	/*
 	 * @region_idle == true indicates that an administrative agent
@@ -37,14 +35,10 @@ static int dax_hmem_probe(struct platform_device *pdev)
 		.dax_region = dax_region,
 		.id = -1,
 		.size = region_idle ? 0 : range_len(&mri->range),
+		.memmap_on_memory = false,
 	};
-	dev_dax = devm_create_dev_dax(&data);
-	if (IS_ERR(dev_dax))
-		return PTR_ERR(dev_dax);
 
-	/* child dev_dax instances now own the lifetime of the dax_region */
-	dax_region_put(dax_region);
-	return 0;
+	return PTR_ERR_OR_ZERO(devm_create_dev_dax(&data));
 }
 
 static struct platform_driver dax_hmem_driver = {
@@ -173,5 +167,6 @@ MODULE_SOFTDEP("pre: cxl_acpi");
 
 MODULE_ALIAS("platform:hmem*");
 MODULE_ALIAS("platform:hmem_platform*");
+MODULE_DESCRIPTION("HMEM DAX: direct access to 'specific purpose' memory");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Intel Corporation");

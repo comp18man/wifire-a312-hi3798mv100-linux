@@ -112,13 +112,11 @@ static unsigned long monitor_region_end __read_mostly;
 module_param(monitor_region_end, ulong, 0600);
 
 /*
- * PID of the DAMON thread
+ * Scale factor for DAMON_LRU_SORT to ops address conversion.
  *
- * If DAMON_LRU_SORT is enabled, this becomes the PID of the worker thread.
- * Else, -1.
+ * This parameter must not be set to 0.
  */
-static int kdamond_pid __read_mostly = -1;
-module_param(kdamond_pid, int, 0400);
+static unsigned long addr_unit __read_mostly = 1;
 
 static struct damos_stat damon_lru_sort_hot_stat;
 DEFINE_DAMON_MODULES_DAMOS_STATS_PARAMS(damon_lru_sort_hot_stat,
@@ -158,10 +156,13 @@ static struct damos *damon_lru_sort_new_scheme(
 			pattern,
 			/* (de)prioritize on LRU-lists */
 			action,
+			/* for each aggregation interval */
+			0,
 			/* under the quota. */
 			&quota,
 			/* (De)activate this according to the watermarks. */
-			&damon_lru_sort_wmarks);
+			&damon_lru_sort_wmarks,
+			NUMA_NO_NODE);
 }
 
 /* Create a DAMON-based operation scheme for hot memory regions */
@@ -185,91 +186,61 @@ static struct damos *damon_lru_sort_new_cold_scheme(unsigned int cold_thres)
 
 static int damon_lru_sort_apply_parameters(void)
 {
-	struct damos *scheme;
+	struct damon_ctx *param_ctx;
+	struct damon_target *param_target;
+	struct damos *hot_scheme, *cold_scheme;
 	unsigned int hot_thres, cold_thres;
-	int err = 0;
+	int err;
 
-	err = damon_set_attrs(ctx, &damon_lru_sort_mon_attrs);
+	err = damon_modules_new_paddr_ctx_target(&param_ctx, &param_target);
 	if (err)
 		return err;
 
-	/* aggr_interval / sample_interval is the maximum nr_accesses */
-	hot_thres = damon_lru_sort_mon_attrs.aggr_interval /
-		damon_lru_sort_mon_attrs.sample_interval *
-		hot_thres_access_freq / 1000;
-	scheme = damon_lru_sort_new_hot_scheme(hot_thres);
-	if (!scheme)
-		return -ENOMEM;
-	damon_set_schemes(ctx, &scheme, 1);
+	/*
+	 * If monitor_region_start/end are unset, always silently
+	 * reset addr_unit to 1.
+	 */
+	if (!monitor_region_start && !monitor_region_end)
+		addr_unit = 1;
+	param_ctx->addr_unit = addr_unit;
+	param_ctx->min_sz_region = max(DAMON_MIN_REGION / addr_unit, 1);
 
-	cold_thres = cold_min_age / damon_lru_sort_mon_attrs.aggr_interval;
-	scheme = damon_lru_sort_new_cold_scheme(cold_thres);
-	if (!scheme)
-		return -ENOMEM;
-	damon_add_scheme(ctx, scheme);
-
-	return damon_set_region_biggest_system_ram_default(target,
-					&monitor_region_start,
-					&monitor_region_end);
-}
-
-static int damon_lru_sort_turn(bool on)
-{
-	int err;
-
-	if (!on) {
-		err = damon_stop(&ctx, 1);
-		if (!err)
-			kdamond_pid = -1;
-		return err;
+	if (!damon_lru_sort_mon_attrs.sample_interval) {
+		err = -EINVAL;
+		goto out;
 	}
 
-	err = damon_lru_sort_apply_parameters();
+	err = damon_set_attrs(param_ctx, &damon_lru_sort_mon_attrs);
 	if (err)
-		return err;
+		goto out;
 
-	err = damon_start(&ctx, 1, true);
+	err = -ENOMEM;
+	hot_thres = damon_max_nr_accesses(&damon_lru_sort_mon_attrs) *
+		hot_thres_access_freq / 1000;
+	hot_scheme = damon_lru_sort_new_hot_scheme(hot_thres);
+	if (!hot_scheme)
+		goto out;
+
+	cold_thres = cold_min_age / damon_lru_sort_mon_attrs.aggr_interval;
+	cold_scheme = damon_lru_sort_new_cold_scheme(cold_thres);
+	if (!cold_scheme) {
+		damon_destroy_scheme(hot_scheme);
+		goto out;
+	}
+
+	damon_set_schemes(param_ctx, &hot_scheme, 1);
+	damon_add_scheme(param_ctx, cold_scheme);
+
+	err = damon_set_region_biggest_system_ram_default(param_target,
+					&monitor_region_start,
+					&monitor_region_end);
 	if (err)
-		return err;
-	kdamond_pid = ctx->kdamond->pid;
-	return 0;
-}
-
-static int damon_lru_sort_enabled_store(const char *val,
-		const struct kernel_param *kp)
-{
-	bool is_enabled = enabled;
-	bool enable;
-	int err;
-
-	err = kstrtobool(val, &enable);
-	if (err)
-		return err;
-
-	if (is_enabled == enable)
-		return 0;
-
-	/* Called before init function.  The function will handle this. */
-	if (!ctx)
-		goto set_param_out;
-
-	err = damon_lru_sort_turn(enable);
-	if (err)
-		return err;
-
-set_param_out:
-	enabled = enable;
+		goto out;
+	err = damon_commit_ctx(ctx, param_ctx);
+out:
+	damon_destroy_ctx(param_ctx);
 	return err;
 }
-
-static const struct kernel_param_ops enabled_param_ops = {
-	.set = damon_lru_sort_enabled_store,
-	.get = param_get_bool,
-};
-
-module_param_cb(enabled, &enabled_param_ops, &enabled, 0600);
-MODULE_PARM_DESC(enabled,
-	"Enable or disable DAMON_LRU_SORT (default: disabled)");
 
 static int damon_lru_sort_handle_commit_inputs(void)
 {
@@ -283,8 +254,9 @@ static int damon_lru_sort_handle_commit_inputs(void)
 	return err;
 }
 
-static int damon_lru_sort_after_aggregation(struct damon_ctx *c)
+static int damon_lru_sort_damon_call_fn(void *arg)
 {
+	struct damon_ctx *c = arg;
 	struct damos *s;
 
 	/* update the stats parameter */
@@ -298,25 +270,154 @@ static int damon_lru_sort_after_aggregation(struct damon_ctx *c)
 	return damon_lru_sort_handle_commit_inputs();
 }
 
-static int damon_lru_sort_after_wmarks_check(struct damon_ctx *c)
-{
-	return damon_lru_sort_handle_commit_inputs();
-}
+static struct damon_call_control call_control = {
+	.fn = damon_lru_sort_damon_call_fn,
+	.repeat = true,
+};
 
-static int __init damon_lru_sort_init(void)
+static int damon_lru_sort_turn(bool on)
 {
-	int err = damon_modules_new_paddr_ctx_target(&ctx, &target);
+	int err;
 
+	if (!on)
+		return damon_stop(&ctx, 1);
+
+	err = damon_lru_sort_apply_parameters();
 	if (err)
 		return err;
 
-	ctx->callback.after_wmarks_check = damon_lru_sort_after_wmarks_check;
-	ctx->callback.after_aggregation = damon_lru_sort_after_aggregation;
+	err = damon_start(&ctx, 1, true);
+	if (err)
+		return err;
+	return damon_call(ctx, &call_control);
+}
+
+static int damon_lru_sort_addr_unit_store(const char *val,
+		const struct kernel_param *kp)
+{
+	unsigned long input_addr_unit;
+	int err = kstrtoul(val, 0, &input_addr_unit);
+
+	if (err)
+		return err;
+	if (!input_addr_unit)
+		return -EINVAL;
+
+	addr_unit = input_addr_unit;
+	return 0;
+}
+
+static const struct kernel_param_ops addr_unit_param_ops = {
+	.set = damon_lru_sort_addr_unit_store,
+	.get = param_get_ulong,
+};
+
+module_param_cb(addr_unit, &addr_unit_param_ops, &addr_unit, 0600);
+MODULE_PARM_DESC(addr_unit,
+	"Scale factor for DAMON_LRU_SORT to ops address conversion (default: 1)");
+
+static bool damon_lru_sort_enabled(void)
+{
+	if (!ctx)
+		return false;
+	return damon_is_running(ctx);
+}
+
+static int damon_lru_sort_enabled_store(const char *val,
+		const struct kernel_param *kp)
+{
+	int err;
+
+	err = kstrtobool(val, &enabled);
+	if (err)
+		return err;
+
+	if (damon_lru_sort_enabled() == enabled)
+		return 0;
+
+	/* Called before init function.  The function will handle this. */
+	if (!damon_initialized())
+		return 0;
+
+	/* damon_modules_new_paddr_ctx_target() in the init function failed. */
+	if (!ctx)
+		return -ENOMEM;
+
+	return damon_lru_sort_turn(enabled);
+}
+
+static int damon_lru_sort_enabled_load(char *buffer,
+		const struct kernel_param *kp)
+{
+	return sprintf(buffer, "%c\n", damon_lru_sort_enabled() ? 'Y' : 'N');
+}
+
+static const struct kernel_param_ops enabled_param_ops = {
+	.set = damon_lru_sort_enabled_store,
+	.get = damon_lru_sort_enabled_load,
+};
+
+module_param_cb(enabled, &enabled_param_ops, &enabled, 0600);
+MODULE_PARM_DESC(enabled,
+	"Enable or disable DAMON_LRU_SORT (default: disabled)");
+
+static int damon_lru_sort_kdamond_pid_store(const char *val,
+		const struct kernel_param *kp)
+{
+	/*
+	 * kdamond_pid is read-only, but kernel command line could write it.
+	 * Do nothing here.
+	 */
+	return 0;
+}
+
+static int damon_lru_sort_kdamond_pid_load(char *buffer,
+		const struct kernel_param *kp)
+{
+	int kdamond_pid = -1;
+
+	if (ctx) {
+		kdamond_pid = damon_kdamond_pid(ctx);
+		if (kdamond_pid < 0)
+			kdamond_pid = -1;
+	}
+	return sprintf(buffer, "%d\n", kdamond_pid);
+}
+
+static const struct kernel_param_ops kdamond_pid_param_ops = {
+	.set = damon_lru_sort_kdamond_pid_store,
+	.get = damon_lru_sort_kdamond_pid_load,
+};
+
+/*
+ * PID of the DAMON thread
+ *
+ * If DAMON_LRU_SORT is enabled, this becomes the PID of the worker thread.
+ * Else, -1.
+ */
+module_param_cb(kdamond_pid, &kdamond_pid_param_ops, NULL, 0400);
+
+static int __init damon_lru_sort_init(void)
+{
+	int err;
+
+	if (!damon_initialized()) {
+		err = -ENOMEM;
+		goto out;
+	}
+	err = damon_modules_new_paddr_ctx_target(&ctx, &target);
+	if (err)
+		goto out;
+
+	call_control.data = ctx;
 
 	/* 'enabled' has set before this function, probably via command line */
 	if (enabled)
 		err = damon_lru_sort_turn(true);
 
+out:
+	if (err && enabled)
+		enabled = false;
 	return err;
 }
 

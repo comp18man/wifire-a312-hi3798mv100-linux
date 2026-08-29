@@ -147,10 +147,11 @@ void bnx2x_fill_fw_str(struct bnx2x *bp, char *buf, size_t buf_len)
 
 		phy_fw_ver[0] = '\0';
 		bnx2x_get_ext_phy_fw_version(&bp->link_params,
-					     phy_fw_ver, PHY_FW_VER_LEN);
-		strscpy(buf, bp->fw_ver, buf_len);
-		snprintf(buf + strlen(bp->fw_ver), 32 - strlen(bp->fw_ver),
-			 "bc %d.%d.%d%s%s",
+					     phy_fw_ver, sizeof(phy_fw_ver));
+		/* This may become truncated. */
+		scnprintf(buf, buf_len,
+			 "%sbc %d.%d.%d%s%s",
+			 bp->fw_ver,
 			 (bp->common.bc_ver & 0xff0000) >> 16,
 			 (bp->common.bc_ver & 0xff00) >> 8,
 			 (bp->common.bc_ver & 0xff),
@@ -1935,8 +1936,7 @@ u16 bnx2x_select_queue(struct net_device *dev, struct sk_buff *skb,
 
 		/* Skip VLAN tag if present */
 		if (ether_type == ETH_P_8021Q) {
-			struct vlan_ethhdr *vhdr =
-				(struct vlan_ethhdr *)skb->data;
+			struct vlan_ethhdr *vhdr = skb_vlan_eth_hdr(skb);
 
 			ether_type = ntohs(vhdr->h_vlan_encapsulated_proto);
 		}
@@ -2716,6 +2716,7 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
 	bnx2x_add_all_napi(bp);
 	DP(NETIF_MSG_IFUP, "napi added\n");
 	bnx2x_napi_enable(bp);
+	bp->nic_stopped = false;
 
 	if (IS_PF(bp)) {
 		/* set pf load just before approaching the MCP */
@@ -2961,6 +2962,7 @@ load_error2:
 load_error1:
 	bnx2x_napi_disable(bp);
 	bnx2x_del_all_napi(bp);
+	bp->nic_stopped = true;
 
 	/* clear pf_load status, as it was already set */
 	if (IS_PF(bp))
@@ -3057,7 +3059,7 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode, bool keep_link)
 
 	bp->rx_mode = BNX2X_RX_MODE_NONE;
 
-	del_timer_sync(&bp->timer);
+	timer_delete_sync(&bp->timer);
 
 	if (IS_PF(bp) && !BP_NOMCP(bp)) {
 		/* Set ALWAYS_ALIVE bit in shmem */
@@ -3096,14 +3098,17 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode, bool keep_link)
 		if (!CHIP_IS_E1x(bp))
 			bnx2x_pf_disable(bp);
 
-		/* Disable HW interrupts, NAPI */
-		bnx2x_netif_stop(bp, 1);
-		/* Delete all NAPI objects */
-		bnx2x_del_all_napi(bp);
-		if (CNIC_LOADED(bp))
-			bnx2x_del_all_napi_cnic(bp);
-		/* Release IRQs */
-		bnx2x_free_irq(bp);
+		if (!bp->nic_stopped) {
+			/* Disable HW interrupts, NAPI */
+			bnx2x_netif_stop(bp, 1);
+			/* Delete all NAPI objects */
+			bnx2x_del_all_napi(bp);
+			if (CNIC_LOADED(bp))
+				bnx2x_del_all_napi_cnic(bp);
+			/* Release IRQs */
+			bnx2x_free_irq(bp);
+			bp->nic_stopped = true;
+		}
 
 		/* Report UNLOAD_DONE to MCP */
 		bnx2x_send_unload_done(bp, false);
@@ -3533,7 +3538,7 @@ static u8 bnx2x_set_pbd_csum_enc(struct bnx2x *bp, struct sk_buff *skb,
 				 u32 *parsing_data, u32 xmit_type)
 {
 	*parsing_data |=
-		((((u8 *)skb_inner_transport_header(skb) - skb->data) >> 1) <<
+		((skb_inner_transport_offset(skb) >> 1) <<
 		ETH_TX_PARSE_BD_E2_L4_HDR_START_OFFSET_W_SHIFT) &
 		ETH_TX_PARSE_BD_E2_L4_HDR_START_OFFSET_W;
 
@@ -3565,7 +3570,7 @@ static u8 bnx2x_set_pbd_csum_e2(struct bnx2x *bp, struct sk_buff *skb,
 				u32 *parsing_data, u32 xmit_type)
 {
 	*parsing_data |=
-		((((u8 *)skb_transport_header(skb) - skb->data) >> 1) <<
+		((skb_transport_offset(skb) >> 1) <<
 		ETH_TX_PARSE_BD_E2_L4_HDR_START_OFFSET_W_SHIFT) &
 		ETH_TX_PARSE_BD_E2_L4_HDR_START_OFFSET_W;
 
@@ -3608,7 +3613,7 @@ static u8 bnx2x_set_pbd_csum(struct bnx2x *bp, struct sk_buff *skb,
 			     struct eth_tx_parse_bd_e1x *pbd,
 			     u32 xmit_type)
 {
-	u8 hlen = (skb_network_header(skb) - skb->data) >> 1;
+	u8 hlen = skb_network_offset(skb) >> 1;
 
 	/* for now NS flag is not used in Linux */
 	pbd->global_data =
@@ -3616,8 +3621,7 @@ static u8 bnx2x_set_pbd_csum(struct bnx2x *bp, struct sk_buff *skb,
 			    ((skb->protocol == cpu_to_be16(ETH_P_8021Q)) <<
 			     ETH_TX_PARSE_BD_E1X_LLC_SNAP_EN_SHIFT));
 
-	pbd->ip_hlen_w = (skb_transport_header(skb) -
-			skb_network_header(skb)) >> 1;
+	pbd->ip_hlen_w = skb_network_header_len(skb) >> 1;
 
 	hlen += pbd->ip_hlen_w;
 
@@ -3662,8 +3666,7 @@ static void bnx2x_update_pbds_gso_enc(struct sk_buff *skb,
 	u8 outerip_off, outerip_len = 0;
 
 	/* from outer IP to transport */
-	hlen_w = (skb_inner_transport_header(skb) -
-		  skb_network_header(skb)) >> 1;
+	hlen_w = skb_inner_transport_offset(skb) >> 1;
 
 	/* transport len */
 	hlen_w += inner_tcp_hdrlen(skb) >> 1;
@@ -3709,7 +3712,7 @@ static void bnx2x_update_pbds_gso_enc(struct sk_buff *skb,
 					0, IPPROTO_TCP, 0));
 	}
 
-	outerip_off = (skb_network_header(skb) - skb->data) >> 1;
+	outerip_off = (skb_network_offset(skb)) >> 1;
 
 	*global_data |=
 		outerip_off |
@@ -4747,6 +4750,7 @@ int bnx2x_alloc_mem_bp(struct bnx2x *bp)
 	fp = kcalloc(bp->fp_array_size, sizeof(*fp), GFP_KERNEL);
 	if (!fp)
 		goto alloc_err;
+	bp->fp = fp;
 	for (i = 0; i < bp->fp_array_size; i++) {
 		fp[i].tpa_info =
 			kcalloc(ETH_MAX_AGGREGATION_QUEUES_E1H_E2,
@@ -4754,8 +4758,6 @@ int bnx2x_alloc_mem_bp(struct bnx2x *bp)
 		if (!(fp[i].tpa_info))
 			goto alloc_err;
 	}
-
-	bp->fp = fp;
 
 	/* allocate sp objs */
 	bp->sp_objs = kcalloc(bp->fp_array_size, sizeof(struct bnx2x_sp_objs),
@@ -4899,7 +4901,7 @@ int bnx2x_change_mtu(struct net_device *dev, int new_mtu)
 	 * because the actual alloc size is
 	 * only updated as part of load
 	 */
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 
 	if (!bnx2x_mtu_allows_gro(new_mtu))
 		dev->features &= ~NETIF_F_GRO_HW;

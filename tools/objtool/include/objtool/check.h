@@ -34,6 +34,8 @@ struct alt_group {
 	 * This is shared with the other alt_groups in the same alternative.
 	 */
 	struct cfi_state **cfi;
+
+	bool ignore;
 };
 
 #define INSN_CHUNK_BITS		8
@@ -54,14 +56,13 @@ struct instruction {
 
 	u32 idx			: INSN_CHUNK_BITS,
 	    dead_end		: 1,
-	    ignore		: 1,
 	    ignore_alts		: 1,
 	    hint		: 1,
 	    save		: 1,
 	    restore		: 1,
 	    retpoline_safe	: 1,
 	    noendbr		: 1,
-	    entry		: 1,
+	    unret		: 1,
 	    visited		: 4,
 	    no_reloc		: 1;
 		/* 10 bit hole */
@@ -71,7 +72,10 @@ struct instruction {
 	struct instruction *first_jump_src;
 	union {
 		struct symbol *_call_dest;
-		struct reloc *_jump_table;
+		struct {
+			struct reloc *_jump_table;
+			unsigned long _jump_table_size;
+		};
 	};
 	struct alternative *alts;
 	struct symbol *sym;
@@ -92,7 +96,7 @@ static inline struct symbol *insn_func(struct instruction *insn)
 #define VISITED_BRANCH		0x01
 #define VISITED_BRANCH_UACCESS	0x02
 #define VISITED_BRANCH_MASK	0x03
-#define VISITED_ENTRY		0x04
+#define VISITED_UNRET		0x04
 
 static inline bool is_static_jump(struct instruction *insn)
 {

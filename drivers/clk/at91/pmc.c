@@ -151,6 +151,7 @@ static struct syscore_ops pmc_syscore_ops = {
 static const struct of_device_id pmc_dt_ids[] = {
 	{ .compatible = "atmel,sama5d2-pmc" },
 	{ .compatible = "microchip,sama7g5-pmc", },
+	{ .compatible = "microchip,sama7d65-pmc", },
 	{ /* sentinel */ }
 };
 
@@ -176,9 +177,9 @@ static int __init pmc_register_ops(void)
 		of_node_put(np);
 		return -ENODEV;
 	}
-	of_node_put(np);
 
 	at91_pmc_backup_suspend = of_iomap(np, 0);
+	of_node_put(np);
 	if (!at91_pmc_backup_suspend) {
 		pr_warn("%s(): unable to map securam\n", __func__);
 		return -ENOMEM;
