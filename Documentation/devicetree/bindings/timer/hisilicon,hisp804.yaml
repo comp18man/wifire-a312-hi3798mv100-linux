@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/timer/hisilicon,hisp804.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: HiSilicon SP804 timer group
+
+maintainers:
+  - linux-arm-kernel@lists.infradead.org
+
+description: |
+  HiSilicon STB SoCs carry several ARM SP804 dual timers. This binding
+  describes the group of them that the kernel drives as one unit: the
+  first timer becomes the system clocksource and sched_clock, and each
+  remaining timer becomes the clockevent of one CPU.
+
+  The timers only run in NORMAL power state - they stop in SLOW and DOZE -
+  and their input rate is fixed at 24 MHz.
+
+properties:
+  compatible:
+    const: hisilicon,hisp804
+
+  reg:
+    minItems: 2
+    maxItems: 5
+    description:
+      One entry for the clocksource timer, followed by one entry per CPU
+      for the per-CPU clockevent timers.
+
+  interrupts:
+    minItems: 1
+    maxItems: 4
+    description:
+      One interrupt per per-CPU clockevent timer, in the same order as the
+      matching reg entries. The clocksource timer has no interrupt.
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: apb_pclk
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    timer@8a29000 {
+        compatible = "hisilicon,hisp804";
+        reg = <0x8a29000 0x20>,
+              <0x8a2a000 0x20>,
+              <0x8a2a020 0x20>,
+              <0x8a2b000 0x20>,
+              <0x8a2b020 0x20>;
+        interrupts = <GIC_SPI 26 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&xtal24mhz>;
+        clock-names = "apb_pclk";
+    };

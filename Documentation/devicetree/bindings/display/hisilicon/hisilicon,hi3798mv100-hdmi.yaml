@@ -1,0 +1,201 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (c) 2026 Hisilicon community
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/hisilicon/hisilicon,hi3798mv100-hdmi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: HiSilicon Hi3798MV100 HDMI transmitter with integrated PHY
+
+allOf:
+  - $ref: /schemas/sound/dai-common.yaml#
+
+maintainers:
+  - Hisilicon STB Platform <linux-arm-kernel@lists.infradead.org>
+
+description: |
+  Hi3798MV100 HDMI 1.4 transmitter block with integrated PHY control and
+  internal DDC/HPD handling logic.
+
+  The block provides:
+    - video output path from VDP to HDMI connector;
+    - HDMI audio codec endpoint via #sound-dai-cells for simple-audio-card
+      integration;
+    - CEC clock domain required by the internal CEC function.
+
+properties:
+  compatible:
+    const: hisilicon,hi3798mv100-hdmi
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    minItems: 7
+    maxItems: 7
+
+  clock-names:
+    items:
+      - const: bus
+      - const: cec
+      - const: id
+      - const: mhl
+      - const: os
+      - const: as
+      - const: phy_bus
+
+  resets:
+    minItems: 3
+    maxItems: 3
+
+  reset-names:
+    items:
+      - const: bus
+      - const: ctrl
+      - const: phy
+
+  "#sound-dai-cells":
+    const: 0
+
+  sound-name-prefix: true
+
+  hisilicon,crg-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to CRG syscon used for HDMI clock/reset and TX clock source
+      configuration.
+
+  hisilicon,peripheral-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to peripheral syscon used by HDMI control/audio source routing.
+
+  pinctrl-names:
+    oneOf:
+      - items:
+          - const: default
+      - items:
+          - const: default
+          - const: gpio
+
+  pinctrl-0: true
+  pinctrl-1: true
+
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+
+    properties:
+      "#address-cells":
+        const: 1
+      "#size-cells":
+        const: 0
+
+      port@0:
+        $ref: /schemas/graph.yaml#/properties/port
+        description:
+          HDMI video input from VDP output endpoint.
+
+      port@1:
+        $ref: /schemas/graph.yaml#/properties/port
+        description:
+          HDMI TMDS output towards an HDMI connector endpoint.
+
+    unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - "#sound-dai-cells"
+  - hisilicon,crg-syscon
+  - hisilicon,peripheral-syscon
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/histb-clock.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        vdp {
+            compatible = "hisilicon,hi3798mv100-vdp";
+
+            ports {
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                port@0 {
+                    reg = <0>;
+
+                    vdp_out: endpoint {
+                        remote-endpoint = <&hdmi_in>;
+                    };
+                };
+            };
+        };
+
+        hdmi: hdmi@8ce0000 {
+            compatible = "hisilicon,hi3798mv100-hdmi";
+            reg = <0x8ce0000 0x20000>;
+            interrupts = <GIC_SPI 88 IRQ_TYPE_LEVEL_HIGH>;
+            clocks = <&crg HISTB_HDMI_TX_BUS_CLK>,
+                     <&crg HISTB_HDMI_TX_CEC_CLK>,
+                     <&crg HISTB_HDMI_TX_ID_CLK>,
+                     <&crg HISTB_HDMI_TX_MHL_CLK>,
+                     <&crg HISTB_HDMI_TX_OS_CLK>,
+                     <&crg HISTB_HDMI_TX_AS_CLK>,
+                     <&crg HISTB_HDMI_PHY_BUS_CLK>;
+            clock-names = "bus", "cec", "id", "mhl", "os", "as", "phy_bus";
+            resets = <&crg 0x10c 8>, <&crg 0x10c 9>, <&crg 0x110 4>;
+            reset-names = "bus", "ctrl", "phy";
+            #sound-dai-cells = <0>;
+            hisilicon,crg-syscon = <&crg>;
+            hisilicon,peripheral-syscon = <&perictrl>;
+            pinctrl-names = "default", "gpio";
+            pinctrl-0 = <&hdmi_ddc_default_pins>;
+            pinctrl-1 = <&hdmi_ddc_gpio_pins>;
+
+            ports {
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                port@0 {
+                    reg = <0>;
+
+                    hdmi_in: endpoint {
+                        remote-endpoint = <&vdp_out>;
+                    };
+                };
+
+                port@1 {
+                    reg = <1>;
+
+                    hdmi_out: endpoint {
+                        remote-endpoint = <&hdmi_con_in>;
+                    };
+                };
+            };
+        };
+
+        hdmi-connector {
+            compatible = "hdmi-connector";
+            type = "a";
+
+            port {
+                hdmi_con_in: endpoint {
+                    remote-endpoint = <&hdmi_out>;
+                };
+            };
+        };
+    };

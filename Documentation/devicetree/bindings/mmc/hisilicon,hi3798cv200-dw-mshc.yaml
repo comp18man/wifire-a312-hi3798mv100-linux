@@ -35,6 +35,12 @@ properties:
       - const: ciu-sample
       - const: ciu-drive
 
+  hisilicon,ddr52-phase-disable:
+    type: boolean
+    description:
+      Do not engage the sample/drive phase shifter in DDR52 mode. Needed on
+      boards whose eMMC routing does not tolerate the shifted sampling point.
+
   hisilicon,sap-dll-reg:
     $ref: /schemas/types.yaml#/definitions/phandle-array
     description: |

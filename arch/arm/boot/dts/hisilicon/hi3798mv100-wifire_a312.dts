@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+/dts-v1/;
+#include "hi3798mv100.dtsi"
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "WIFIRE Snowbox Palm 2/A312";
+	compatible = "wifire,a312", "hisilicon,hi3798mv100";
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		linux_cma: linux,cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x08000000>;
+			alignment = <0x00200000>;
+			linux,cma-default;
+		};
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/*
+	 * Front panel, three indicators:
+	 *
+	 * power - red/green, never goes dark. Its line picks the colour
+	 *         instead of switching the part on, so the eMMC trigger
+	 *         reads as red flashes over a green idle.
+	 * lan   - red/green, only the green half reaches GPIO. Its trigger
+	 *         is named after the MDIO bus and PHY address.
+	 * sd    - Follows SD slot and blinks with once-a-second card poll "broken-cd".
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led-0 {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio2 2 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "f9841100.mdio:01:100Mbps";
+			default-state = "off";
+		};
+
+		led-1 {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_POWER;
+			gpios = <&gpio5 2 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "mmc0";
+			default-state = "off";
+		};
+	};
+
+	hdmi_connector: hdmi-connector {
+		compatible = "hdmi-connector";
+		type = "a";
+
+		port {
+			hdmi_con_in: endpoint {
+				remote-endpoint = <&hdmi_out>;
+			};
+		};
+	};
+
+};
+
+&hisp804 {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio2 {
+	status = "okay";
+};
+
+&gpio4 {
+	status = "okay";
+};
+
+&gpio5 {
+	status = "okay";
+};
+
+&vdd_gpu {
+	status = "okay";
+};
+
+&vdd_cpu {
+	status = "okay";
+};
+
+&mmc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	fifo-depth = <256>;
+	clock-frequency = <200000000>;
+	max-frequency = <200000000>;
+	cap-mmc-highspeed;
+	bus-width = <8>;
+	mmc-ddr-1_8v;
+	mmc-ddr-3_3v;
+	mmc-hs200-1_8v;
+	non-removable;
+	clk-phase-mmc-hs200 = <0 135>;
+	hisilicon,ddr52-phase-disable;
+	status = "okay";
+};
+
+&sd {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	fifo-depth = <256>;
+	clock-frequency = <200000000>;
+	max-frequency = <200000000>;
+	bus-width = <4>;
+	card-detect-delay = <200>;
+	cap-sd-highspeed;
+	disable-wp;
+	broken-cd;
+	status = "okay";
+};
+
+&eth0 {
+	status = "okay";
+};
+
+&ohci0 {
+	status = "okay";
+};
+
+&ehci0 {
+	status = "okay";
+};
+
+&ohci1 {
+	status = "okay";
+};
+
+&ehci1 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+&ir {
+	linux,rc-map-name = "rc-hisi-poplar";
+	status = "okay";
+};
+
+&vdp {
+	status = "okay";
+};
+
+&aiao {
+	status = "okay";
+};
+
+&aiao_i2s3 {
+	status = "okay";
+};
+
+&hdmi_audio {
+	status = "okay";
+};
+
+&hdmi {
+	status = "okay";
+};
+
+&hdmi_out {
+	remote-endpoint = <&hdmi_con_in>;
+};
+
+&vdp_drm {
+	status = "okay";
+};

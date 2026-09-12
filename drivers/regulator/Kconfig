@@ -478,6 +478,14 @@ config REGULATOR_HI655X
 	  This driver provides support for the voltage regulators of the
 	  Hisilicon Hi655x PMIC device.
 
+config REGULATOR_HI3798MV100
+	tristate "HiSilicon Hi3798MV100 PWM regulator support"
+	depends on OF
+	depends on ARCH_HISI || COMPILE_TEST
+	help
+	  This driver provides support for the SoC-integrated PWM voltage
+	  regulator control blocks on HiSilicon Hi3798MV100 platforms.
+
 config REGULATOR_HI6421V600
 	tristate "HiSilicon Hi6421v600 PMIC voltage regulator support"
 	depends on MFD_HI6421_SPMI && OF

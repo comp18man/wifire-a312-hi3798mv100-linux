@@ -54,7 +54,7 @@
 #define CPU0_SRST_REQ_EN		(1 << 0)
 
 #define HIX5HD2_PERI_CRG20		0x50
-#define CRG20_ARM_SRST(i)		(1 << ((i) + 16))
+#define CRG20_CPU1_RESET		(1 << 17)
 
 #define HIX5HD2_PERI_PMC0		0x1000
 #define PMC0_CPU1_WAIT_MTCOMS_ACK	(1 << 8)
@@ -67,8 +67,9 @@
 #define HI3798_PERI_CRG18		0x48
 #define CRG18_CPU_SW_BEGIN		(1 << 10)
 #define HI3798_PERI_CRG20		0x50
-#define CRG20_ARM_POR_SRST(i)		(1 << ((i) + 12))
-#define CRG20_CLUSTER_DBG_SRST(i)	(1 << ((i) + 20))
+#define HI3798_CRG20_ARM_SRST(i)	(1 << ((i) + 16))
+#define HI3798_CRG20_ARM_POR_SRST(i)	(1 << ((i) + 12))
+#define HI3798_CRG20_CLUSTER_DBG_SRST(i) (1 << ((i) + 20))
 
 enum {
 	HI3620_CTRL,
@@ -209,7 +210,7 @@ void hix5hd2_set_cpu(int cpu, bool enable)
 		writel_relaxed(val, ctrl_base + HIX5HD2_PERI_PMC0);
 		/* unreset */
 		val = readl_relaxed(ctrl_base + HIX5HD2_PERI_CRG20);
-		val &= ~CRG20_ARM_SRST(cpu);
+		val &= ~CRG20_CPU1_RESET;
 		writel_relaxed(val, ctrl_base + HIX5HD2_PERI_CRG20);
 	} else {
 		/* power down cpu1 */
@@ -217,9 +218,10 @@ void hix5hd2_set_cpu(int cpu, bool enable)
 		val |= PMC0_CPU1_PMC_ENABLE | PMC0_CPU1_POWERDOWN;
 		val &= ~PMC0_CPU1_WAIT_MTCOMS_ACK;
 		writel_relaxed(val, ctrl_base + HIX5HD2_PERI_PMC0);
+
 		/* reset */
 		val = readl_relaxed(ctrl_base + HIX5HD2_PERI_CRG20);
-		val |= CRG20_ARM_SRST(cpu);
+		val |= CRG20_CPU1_RESET;
 		writel_relaxed(val, ctrl_base + HIX5HD2_PERI_CRG20);
 	}
 }
@@ -270,15 +272,15 @@ void hi3798_set_cpu(int cpu, bool enable)
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG18);
 		/* unreset arm_por_srst_req */
 		val = readl_relaxed(ctrl_base + HI3798_PERI_CRG20);
-		val &= ~CRG20_ARM_POR_SRST(cpu);
+		val &= ~HI3798_CRG20_ARM_POR_SRST(cpu);
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG20);
 		/* unreset cluster_dbg_srst_req */
 		val = readl_relaxed(ctrl_base + HI3798_PERI_CRG20);
-		val &= ~CRG20_CLUSTER_DBG_SRST(cpu);
+		val &= ~HI3798_CRG20_CLUSTER_DBG_SRST(cpu);
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG20);
 		/* unreset */
 		val = readl_relaxed(ctrl_base + HI3798_PERI_CRG20);
-		val &= ~CRG20_ARM_SRST(cpu);
+		val &= ~HI3798_CRG20_ARM_SRST(cpu);
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG20);
 		/* restore freq */
 		val = val_crg18 & ~CRG18_CPU_SW_BEGIN;
@@ -287,20 +289,19 @@ void hi3798_set_cpu(int cpu, bool enable)
 	} else {
 		/* reset */
 		val = readl_relaxed(ctrl_base + HI3798_PERI_CRG20);
-		val |= CRG20_ARM_SRST(cpu);
+		val |= HI3798_CRG20_ARM_SRST(cpu);
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG20);
 		/* reset cluster_dbg_srst_req */
 		val = readl_relaxed(ctrl_base + HI3798_PERI_CRG20);
-		val |= CRG20_CLUSTER_DBG_SRST(cpu);
+		val |= HI3798_CRG20_CLUSTER_DBG_SRST(cpu);
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG20);
 		/* reset arm_por_srst_req */
 		val = readl_relaxed(ctrl_base + HI3798_PERI_CRG20);
-		val |= CRG20_ARM_POR_SRST(cpu);
+		val |= HI3798_CRG20_ARM_POR_SRST(cpu);
 		writel_relaxed(val, ctrl_base + HI3798_PERI_CRG20);
 	}
 }
 
-#ifdef CONFIG_HOTPLUG_CPU
 static inline void cpu_enter_lowpower(void)
 {
 	unsigned int v;
@@ -322,45 +323,7 @@ static inline void cpu_enter_lowpower(void)
 	  : "cc");
 }
 
-static inline void cpu_leave_lowpower(void)
-{
-	unsigned int v;
-
-	asm volatile(
-	"	mrc	p15, 0, %0, c1, c0, 0\n"
-	"	orr	%0, %0, #0x04\n"
-	"	mcr	p15, 0, %0, c1, c0, 0\n"
-	"	mrc	p15, 0, %0, c1, c0, 1\n"
-	"	orr	%0, %0, #0x20\n"
-	"	mcr	p15, 0, %0, c1, c0, 1\n"
-	  : "=&r" (v)
-	  :
-	  : "cc");
-}
-
-static inline void hisi_do_lowpower(unsigned int cpu, int *spurious)
-{
-	for (;;) {
-		wfi();
-
-		if (hisi_pen_release == cpu) {
-			/*
-			 * OK, proper wakeup, we're done
-			 */
-			break;
-		}
-
-		/*
-		 * Getting here, means that we have come out of WFI without
-		 * having been woken up - this shouldn't happen
-		 *
-		 * Just note it happening - when we're woken, we can report
-		 * its occurrence.
-		 */
-		(*spurious)++;
-	}
-}
-
+#ifdef CONFIG_HOTPLUG_CPU
 void hi3xxx_cpu_die(unsigned int cpu)
 {
 	cpu_enter_lowpower();
@@ -390,22 +353,15 @@ void hix5hd2_cpu_die(unsigned int cpu)
 
 void hi3798_cpu_die(unsigned int cpu)
 {
-	int spurious = 0;
-
-	/*
-	 * we're ready for shutdown now, so do it
-	 */
 	cpu_enter_lowpower();
-	hisi_do_lowpower(cpu, &spurious);
 
 	/*
-	 * bring this CPU back into the world of cache
-	 * coherency, and then restore interrupts
+	 * Killing CPU asserts this core's reset from hi3798_cpu_kill(),
+	 * so control never leaves this loop; a spurious wakeup just parks
+	 * the core in WFI again.
 	 */
-	cpu_leave_lowpower();
-
-	if (spurious)
-		pr_warn("CPU%u: %u spurious wakeup calls\n", cpu, spurious);
+	while (1)
+		cpu_do_idle();
 }
 
 int hi3798_cpu_kill(unsigned int cpu)

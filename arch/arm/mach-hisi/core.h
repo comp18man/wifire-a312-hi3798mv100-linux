@@ -4,9 +4,6 @@
 
 #include <linux/reboot.h>
 
-extern volatile int hisi_pen_release;
-extern void hisi_secondary_startup(void);
-
 extern void hi3xxx_set_cpu_jump(int cpu, void *jump_addr);
 extern int hi3xxx_get_cpu_jump(int cpu);
 extern void secondary_startup(void);

@@ -71,6 +71,21 @@
 #define HISTB_FEPHY_CLK			61
 #define HISTB_GPU_BUS_CLK		62
 #define HISTB_GPU_GP_CLK		63
+#define HISTB_CPU_CLK			64
+#define HISTB_VO_BUS_CLK		92
+#define HISTB_VO_CLK			93
+#define HISTB_VO_SD_CLK			94
+#define HISTB_VO_SDATE_CLK		95
+#define HISTB_VO_HD_CLK			96
+#define HISTB_VO_HDATE_CLK		97
+#define HISTB_HDMI_TX_BUS_CLK		98
+#define HISTB_HDMI_TX_CEC_CLK		99
+#define HISTB_HDMI_TX_ID_CLK		100
+#define HISTB_HDMI_TX_MHL_CLK		101
+#define HISTB_HDMI_TX_OS_CLK		102
+#define HISTB_HDMI_TX_AS_CLK		103
+#define HISTB_HDMI_PHY_BUS_CLK		104
+#define HISTB_AIAO_CLK			108
 
 /* clocks provided by mcu CRG */
 #define HISTB_MCE_CLK			1

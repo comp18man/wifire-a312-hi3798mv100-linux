@@ -1,27 +1,33 @@
-Before you begin
-=====================================
+Свежее майнлайн ядро Linux для ТВ приставки Wifire Snowbox Palm2 / A312.
 
-It is recommended to install the latest precompiled kernel directly: https://github.com/loonpn/ec6108v9c-linux-kernel/releases/latest
+Работает:
+-Все фичи CPU и таймеров (включая L2)
+-HDMI (+DRM) + звук по HDMI
+-Проводная сеть
+-WIFI
+-USB
+-MicroSD (и emmc)
+-Ir (пульт)
+-Светодиоды (power = emmc, сеть = eth0, ir - microsd)
 
-Simple steps:
-  1. Download uImage and modules.tar.gz files.
-  2. Unzip modules.tar.gz to the root directory.
-  3. Use HiTool or dd command to write uImage to the kernel partition.
+Не работает:
+-3D ускорение (lima с майнлайн для нашего случая - баганный)
+-VDEC (аппаратное ускорение видео) (в sdk fw в .h файле и куча asm файлов - реверсить/колхозить такое себе)
+-Jack 3.5: композитное видео + звук по нему же (не работает и в sdk - с набегу реверс не удался)
+-SPDIF звук (не на чем тестить)
 
 
-How to build this kernel?
-=====================================
+Зачатки по VDEC и CEC забросил - перестало хватать времени.
 
-Prepare the compiler:
-  ``sudo apt install -y gcc make gettext bison flex bc zlib1g-dev libncurses5-dev lzma libssl-dev gcc-arm-linux-gnueabi``
-Copy and change the configuration:
-  ``make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- hi3798mv100_defconfig``
-  ``make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- menuconfig``
-Compile the kernel:
-  ``make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j$(nproc)``
-Make flashable image:
-  ``cat arch/arm/boot/zImage arch/arm/boot/dts/$chip.dtb > zImage-dtb``
-  ``mkimage -A arm -O linux -T kernel -C none -a 0X2000000 -e 0X2000000 -n linux -d zImage-dtb uImage``
+
+
+Подробная статья о железе приставки:
+https://debianlive.ru/2025/04/hyboard-z123-formuler-z-nano-wifire-snowbox-palm2-a312-%d0%b8%d0%b3%d1%80%d0%b0%d0%b5%d0%bc%d1%81%d1%8f-%d1%81-hisilicon-hi3798mv100-%d0%b4%d0%b5%d0%bb%d0%b0%d0%b5%d0%bc-%d0%bc%d0%b8%d0%bd%d0%b8/
+
+По этой же ссылке найдете и сборку Debian для этой приставки на этом ядре (в конце статьи или в меню сайта).
+
+
+
 
 
 Linux kernel

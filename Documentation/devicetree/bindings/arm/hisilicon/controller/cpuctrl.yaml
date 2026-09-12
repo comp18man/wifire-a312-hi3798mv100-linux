@@ -13,6 +13,14 @@ description: |
   The clock registers and power registers of secondary cores are defined
   in CPU controller, especially in HIX5HD2 SoC.
 
+select:
+  properties:
+    compatible:
+      items:
+        - const: hisilicon,cpuctrl
+  required:
+    - compatible
+
 properties:
   compatible:
     items:

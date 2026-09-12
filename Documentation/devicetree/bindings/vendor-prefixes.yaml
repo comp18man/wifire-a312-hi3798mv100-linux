@@ -1779,6 +1779,8 @@ patternProperties:
     description: Wexler
   "^whwave,.*":
     description: Shenzhen whwave Electronics, Inc.
+  "^wifire,.*":
+    description: WIFIRE
   "^wi2wi,.*":
     description: Wi2Wi, Inc.
   "^widora,.*":

@@ -222,6 +222,4 @@ source "drivers/mtd/ubi/Kconfig"
 
 source "drivers/mtd/hyperbus/Kconfig"
 
-source "drivers/mtd/hisilicon/Kconfig"
-
 endif # MTD

@@ -959,10 +959,10 @@ static int dw_mci_get_cd(struct mmc_host *mmc)
 
 		if (!test_bit(DW_MMC_CARD_PRESENT, &slot->flags)) {
 			if (mmc->caps & MMC_CAP_NEEDS_POLL) {
-				dev_info(&mmc->class_dev,
+				dev_dbg(&mmc->class_dev,
 					"card is polling.\n");
 			} else {
-				dev_info(&mmc->class_dev,
+				dev_dbg(&mmc->class_dev,
 					"card is non-removable.\n");
 			}
 			set_bit(DW_MMC_CARD_PRESENT, &slot->flags);
@@ -1233,7 +1233,7 @@ static void dw_mci_setup_bus(struct dw_mci_slot *slot, bool force_clkinit)
 			force_clkinit) {
 			/* Silent the verbose log if calling from PM context */
 			if (!force_clkinit)
-				dev_info(&slot->mmc->class_dev,
+				dev_dbg(&slot->mmc->class_dev,
 					 "Bus speed (slot %d) = %dHz (slot req %dHz, actual %dHZ div = %d)\n",
 					 slot->id, host->bus_hz, clock,
 					 div ? ((host->bus_hz / div) >> 1) :

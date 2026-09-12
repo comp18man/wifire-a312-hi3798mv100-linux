@@ -21,11 +21,14 @@
 struct hi3798cv200_priv {
 	struct clk *sample_clk;
 	struct clk *drive_clk;
+	struct mmc_clk_phase_map phase_map;
+	bool ddr52_phase_disable;
 };
 
 static void dw_mci_hi3798cv200_set_ios(struct dw_mci *host, struct mmc_ios *ios)
 {
 	struct hi3798cv200_priv *priv = host->priv;
+	struct mmc_clk_phase phase = priv->phase_map.phase[ios->timing];
 	u32 val;
 
 	val = mci_readl(host, UHS_REG);
@@ -37,10 +40,14 @@ static void dw_mci_hi3798cv200_set_ios(struct dw_mci *host, struct mmc_ios *ios)
 	mci_writel(host, UHS_REG, val);
 
 	val = mci_readl(host, ENABLE_SHIFT);
-	if (ios->timing == MMC_TIMING_MMC_DDR52)
-		val |= SDMMC_ENABLE_PHASE;
-	else
+	if (ios->timing == MMC_TIMING_MMC_DDR52) {
+		if (priv->ddr52_phase_disable)
+			val &= ~SDMMC_ENABLE_PHASE;
+		else
+			val |= SDMMC_ENABLE_PHASE;
+	} else {
 		val &= ~SDMMC_ENABLE_PHASE;
+	}
 	mci_writel(host, ENABLE_SHIFT, val);
 
 	val = mci_readl(host, DDR_REG);
@@ -50,11 +57,38 @@ static void dw_mci_hi3798cv200_set_ios(struct dw_mci *host, struct mmc_ios *ios)
 		val &= ~SDMMC_DDR_HS400;
 	mci_writel(host, DDR_REG, val);
 
-	if (ios->timing == MMC_TIMING_MMC_HS ||
-	    ios->timing == MMC_TIMING_LEGACY)
+	if (phase.valid) {
+		clk_set_phase(priv->drive_clk, phase.out_deg);
+		clk_set_phase(priv->sample_clk, phase.in_deg);
+		return;
+	}
+
+	/*
+	 * Fallback phases from the vendor himciv200 driver, used only when DT
+	 * gives no clk-phase-* entry.
+	 */
+	if (ios->timing == MMC_TIMING_LEGACY || ios->timing == MMC_TIMING_MMC_HS) {
 		clk_set_phase(priv->drive_clk, 180);
-	else if (ios->timing == MMC_TIMING_MMC_HS200)
+		return;
+	}
+
+	if (ios->timing == MMC_TIMING_MMC_DDR52) {
+		if (ios->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
+			clk_set_phase(priv->sample_clk, 225);
+		else
+			clk_set_phase(priv->sample_clk, 135);
+
+		clk_set_phase(priv->drive_clk, 180);
+		return;
+	}
+
+	if (ios->timing == MMC_TIMING_MMC_HS200) {
 		clk_set_phase(priv->drive_clk, 135);
+		return;
+	}
+
+	if (ios->timing == MMC_TIMING_MMC_HS400)
+		clk_set_phase(priv->drive_clk, 90);
 }
 
 static int dw_mci_hi3798cv200_execute_tuning(struct dw_mci_slot *slot,
@@ -108,6 +142,11 @@ tuning_out:
 		clk_set_phase(priv->sample_clk, degrees[i]);
 		dev_dbg(host->dev, "Tuning clk_sample[%d, %d], set[%d]\n",
 			raise_point, fall_point, degrees[i]);
+		/*
+		 * err holds last probed phase, normally a failing one.
+		 * A window was found, so tuning succeeded.
+		 */
+		err = 0;
 	} else {
 		dev_err(host->dev, "No valid clk_sample shift! use default\n");
 		err = -EINVAL;
@@ -125,6 +164,11 @@ static int dw_mci_hi3798cv200_init(struct dw_mci *host)
 	priv = devm_kzalloc(host->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
+
+	mmc_of_parse_clk_phase(host->dev, &priv->phase_map);
+	priv->ddr52_phase_disable =
+		device_property_read_bool(host->dev,
+					  "hisilicon,ddr52-phase-disable");
 
 	priv->sample_clk = devm_clk_get(host->dev, "ciu-sample");
 	if (IS_ERR(priv->sample_clk)) {

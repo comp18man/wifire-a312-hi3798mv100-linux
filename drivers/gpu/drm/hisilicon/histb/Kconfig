@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_HISI_HISTB_VDP
+	tristate "HiSilicon STB VDP support"
+	depends on DRM && OF && COMMON_CLK && RESET_CONTROLLER
+	depends on MFD_SYSCON
+	depends on ARCH_HISI || COMPILE_TEST
+	help
+	  Video display processor of the HiSilicon STB SoCs, as found on
+	  hi3798mv100. Drives the graphics and video layers and the mixer,
+	  and provides the scanout the DRM driver builds on.
+
+	  Say Y if you want display output on such a SoC.
+
+config DRM_HISI_HISTB_HDMI
+	tristate "HiSilicon STB HDMI support"
+	depends on DRM && OF && COMMON_CLK && RESET_CONTROLLER
+	depends on MFD_SYSCON
+	depends on ARCH_HISI || COMPILE_TEST
+	help
+	  HDMI transmitter and PHY of the HiSilicon STB SoCs, as found on
+	  hi3798mv100. Registers a DRM bridge with an HDMI audio codec,
+	  and reads the sink EDID.
+
+	  Say Y if you want HDMI output on such a SoC.
+
+config DRM_HISI_HISTB_DRM
+	tristate "HiSilicon STB DRM/KMS output"
+	depends on DRM && OF
+	depends on DRM_HISI_HISTB_VDP
+	depends on DRM_HISI_HISTB_HDMI
+	depends on ARCH_HISI || COMPILE_TEST
+	select DRM_DISPLAY_HELPER
+	select DRM_BRIDGE_CONNECTOR
+	select DRM_CLIENT_SELECTION
+	select DRM_DISPLAY_HDCP_HELPER
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	help
+	  Atomic DRM/KMS driver tying the histb VDP and HDMI blocks together.
+	  Provides /dev/dri/card* with one CRTC, a graphics and a video plane,
+	  dumb buffers and fbdev emulation.
+
+	  Say Y to expose the display pipeline to userspace.

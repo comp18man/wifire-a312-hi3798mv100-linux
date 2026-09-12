@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (c) 2026 Hisilicon community
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/hisilicon/hisilicon,hi3798mv100-vdp.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: HiSilicon Hi3798MV100 Video Display Processor (VDP)
+
+maintainers:
+  - Hisilicon STB Platform <linux-arm-kernel@lists.infradead.org>
+
+description: |
+  The Hi3798MV100 VDP is the display controller block used to fetch frame data
+  from memory, compose graphics/video layers and drive the display output path.
+  It is typically connected to an HDMI transmitter block through a DT graph.
+
+properties:
+  compatible:
+    const: hisilicon,hi3798mv100-vdp
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    minItems: 6
+    maxItems: 6
+
+  clock-names:
+    items:
+      - const: bus
+      - const: vo
+      - const: sd
+      - const: sdate
+      - const: hd
+      - const: hdate
+
+  resets:
+    maxItems: 1
+
+  reset-names:
+    items:
+      - const: vou
+
+  hisilicon,crg-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the CRG syscon used for mode-dependent VDP clock/PLL control.
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description:
+      VDP output routed to the next display block, the HDMI transmitter.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - hisilicon,crg-syscon
+  - port
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/histb-clock.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        vdp: display-controller@8cc0000 {
+            compatible = "hisilicon,hi3798mv100-vdp";
+            reg = <0x8cc0000 0x10000>;
+            interrupts = <GIC_SPI 90 IRQ_TYPE_LEVEL_HIGH>;
+            clocks = <&crg HISTB_VO_BUS_CLK>,
+                     <&crg HISTB_VO_CLK>,
+                     <&crg HISTB_VO_SD_CLK>,
+                     <&crg HISTB_VO_SDATE_CLK>,
+                     <&crg HISTB_VO_HD_CLK>,
+                     <&crg HISTB_VO_HDATE_CLK>;
+            clock-names = "bus", "vo", "sd", "sdate", "hd", "hdate";
+            resets = <&crg 0xd8 30>;
+            reset-names = "vou";
+            hisilicon,crg-syscon = <&crg>;
+
+            port {
+                vdp_out: endpoint {
+                    remote-endpoint = <&hdmi_in>;
+                };
+            };
+        };
+
+        hdmi-tx {
+            compatible = "hisilicon,hi3798mv100-hdmi";
+
+            ports {
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                port@0 {
+                    reg = <0>;
+
+                    hdmi_in: endpoint {
+                        remote-endpoint = <&vdp_out>;
+                    };
+                };
+            };
+        };
+    };

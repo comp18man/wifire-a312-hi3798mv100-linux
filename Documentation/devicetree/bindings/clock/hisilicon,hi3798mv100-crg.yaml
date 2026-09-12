@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/hisilicon,hi3798mv100-crg.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: HiSilicon Hi3798MV100 Clock and Reset Generator
+
+maintainers:
+  - linux-arm-kernel@lists.infradead.org
+
+description: |
+  The Hi3798MV100 exposes clock and reset control through two register
+  blocks. The peripheral CRG covers most on-SoC devices, while the system
+  controller covers the always-on domain (UART0, IR, watchdog reset).
+
+  Both blocks also act as syscon providers: other drivers reach single
+  configuration bits inside them by phandle.
+
+  Clock and reset indices are defined in
+  include/dt-bindings/clock/histb-clock.h.
+
+# The peripheral CRG also answers to "hisilicon,cpuctrl", which is how the
+# shared mach-hisi SMP code finds it. That compatible belongs to
+# arm/hisilicon/controller/cpuctrl.yaml, so select on our own names only.
+select:
+  properties:
+    compatible:
+      contains:
+        enum:
+          - hisilicon,hi3798mv100-crg
+          - hisilicon,hi3798mv100-sysctrl
+  required:
+    - compatible
+
+properties:
+  compatible:
+    oneOf:
+      - items:
+          - const: hisilicon,hi3798mv100-crg
+          - const: hisilicon,cpuctrl
+          - const: syscon
+          - const: simple-mfd
+      - items:
+          - const: hisilicon,hi3798mv100-sysctrl
+          - const: syscon
+
+  reg:
+    maxItems: 1
+
+  hisilicon,sysctrl:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the system controller. The CPU clock reads its locked
+      frequency selection from a bit that lives in that block.
+
+  hisilicon,perictrl:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the peripheral controller. The GPU clock mux drives its
+      low-power handshake through that block.
+
+  '#clock-cells':
+    const: 1
+
+  '#reset-cells':
+    description:
+      Register offset within the block, followed by the bit number.
+    const: 2
+
+required:
+  - compatible
+  - reg
+  - '#clock-cells'
+  - '#reset-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller@8a22000 {
+        compatible = "hisilicon,hi3798mv100-crg", "hisilicon,cpuctrl",
+                     "syscon", "simple-mfd";
+        reg = <0x8a22000 0x2000>;
+        hisilicon,sysctrl = <&sysctrl>;
+        hisilicon,perictrl = <&perictrl>;
+        #clock-cells = <1>;
+        #reset-cells = <2>;
+    };

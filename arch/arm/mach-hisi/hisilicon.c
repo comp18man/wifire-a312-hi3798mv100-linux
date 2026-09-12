@@ -10,6 +10,7 @@
 
 #include <linux/clocksource.h>
 #include <linux/irqchip.h>
+#include <linux/of.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -51,38 +52,9 @@ DT_MACHINE_START(HI3620, "Hisilicon Hi3620 (Flattened Device Tree)")
 	.dt_compat	= hi3xxx_compat,
 MACHINE_END
 
-#define S40_IOCH1_PHYS_BASE		0xf8000000
-#define S40_IOCH1_VIRT_BASE		0xf9000000
-#define S40_IOCH1_SIZE			0x02000000
-
-static struct map_desc s40_io_desc[] __initdata = {
-	{
-		.pfn		= __phys_to_pfn(S40_IOCH1_PHYS_BASE),
-		.virtual	= S40_IOCH1_VIRT_BASE,
-		.length		= S40_IOCH1_SIZE,
-		.type		= MT_DEVICE,
-	},
-};
-
-static void __init s40_map_io(void)
-{
-	debug_ll_io_init();
-	iotable_init(s40_io_desc, ARRAY_SIZE(s40_io_desc));
-}
-
-static const char *const s40_compat[] __initconst = {
-	"hisilicon,hi3796cv200",
-	"hisilicon,hi3796mv200",
-	"hisilicon,hi3798cv200",
-	"hisilicon,hi3798mv200",
-	"hisilicon,hi3798mv300",
-	NULL,
-};
-
-DT_MACHINE_START(S40, "Hisilicon S40 (Flattened Device Tree)")
-	.map_io		= s40_map_io,
-	.dt_compat	= s40_compat,
-MACHINE_END
+#define S5_IOCH1_PHYS_BASE		0xf8000000
+#define S5_IOCH1_VIRT_BASE		0xf9000000
+#define S5_IOCH1_SIZE			0x02000000
 
 #define S5_IOCH2_PHYS_BASE		0xff000000
 #define S5_IOCH2_VIRT_BASE		0xfb000000
@@ -90,9 +62,9 @@ MACHINE_END
 
 static struct map_desc s5_io_desc[] __initdata = {
 	{
-		.pfn		= __phys_to_pfn(S40_IOCH1_PHYS_BASE),
-		.virtual	= S40_IOCH1_VIRT_BASE,
-		.length		= S40_IOCH1_SIZE,
+		.pfn		= __phys_to_pfn(S5_IOCH1_PHYS_BASE),
+		.virtual	= S5_IOCH1_VIRT_BASE,
+		.length		= S5_IOCH1_SIZE,
 		.type		= MT_DEVICE,
 	},
 	{
@@ -109,6 +81,29 @@ static void __init s5_map_io(void)
 	iotable_init(s5_io_desc, ARRAY_SIZE(s5_io_desc));
 }
 
+/*
+ * ACTLR as the SDK sets it in hi3798mx_init_early(), boot CPU only: bit 2
+ * enables L1 prefetch, bit 8 restricts allocation to one cache way.
+ */
+static void __init hi3798mv100_init_early(void)
+{
+	u32 val;
+
+	asm volatile(
+	"mrc	p15, 0, %0, c1, c0, 1\n"
+	"orr	%0, %0, #0x104\n"
+	"mcr	p15, 0, %0, c1, c0, 1\n"
+		: "=&r" (val)
+		:
+		: "cc");
+}
+
+static void __init s5_init_early(void)
+{
+	if (of_machine_is_compatible("hisilicon,hi3798mv100"))
+		hi3798mv100_init_early();
+}
+
 static const char *const s5_compat[] __initconst = {
 	"hisilicon,hi3716cv200",
 	"hisilicon,hi3716mv410",
@@ -118,5 +113,6 @@ static const char *const s5_compat[] __initconst = {
 
 DT_MACHINE_START(S5, "Hisilicon S5 (Flattened Device Tree)")
 	.map_io		= s5_map_io,
+	.init_early	= s5_init_early,
 	.dt_compat	= s5_compat,
 MACHINE_END

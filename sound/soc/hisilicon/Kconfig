@@ -7,4 +7,13 @@ config SND_I2S_HI6210_I2S
 	help
 	  Hisilicon I2S
 
+config SND_SOC_HI3798MV100_I2S
+	tristate "HiSilicon Hi3798MV100 I2S controller"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on COMMON_CLK
+	select SND_SOC_HDMI_CODEC
+	help
+	  ASoC CPU DAI driver for the HiSilicon Hi3798MV100 AIAO I2S
+	  transmit interface.
+
 endmenu
